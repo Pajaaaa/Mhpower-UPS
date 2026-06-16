@@ -75,7 +75,6 @@ děliči.
   takt CPU (kvůli ladění výpadků bez sériáku).
 - **Log událostí** — kruhový log (výpadky sítě, baterie, alarmy) s NTP časem, `/api/events` i ve webu.
 - **WiFi dohled** — aktivní reconnect, po 5 min bez WiFi tvrdý restart; **task watchdog** proti zaseknutí.
-- **mDNS** — dostupné na `http://<název>.local` bez znalosti IP.
 - **Úsporný režim** — snížený WiFi výkon, WiFi modem‑sleep, CPU 160 MHz, vypnutý Bluetooth,
   throttle snímání (nesnímá naplno pořád).
 

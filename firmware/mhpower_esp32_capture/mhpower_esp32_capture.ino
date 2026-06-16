@@ -20,7 +20,6 @@
 #include <soc/gpio_struct.h>
 #include <esp_system.h>
 #include <esp_task_wdt.h>
-#include <ESPmDNS.h>
 #include <time.h>
 #include <math.h>
 
@@ -1739,8 +1738,8 @@ void handleEvents() {
   sendEventsJson();
 }
 
-// hostname pro mDNS/DHCP: z deviceName ponech jen [a-z0-9-], jinak "mhpower"
-String mdnsHostname() {
+// DHCP hostname: z deviceName ponech jen [a-z0-9-], jinak "mhpower"
+String deviceHostname() {
   String h;
   for (const char* p = settings.deviceName; *p; p++) {
     char c = *p;
@@ -1755,7 +1754,7 @@ void setupWifiAndWeb() {
   WiFi.persistent(false);
   WiFi.onEvent(onWifiEvent);
   WiFi.mode(WIFI_STA);
-  WiFi.setHostname(mdnsHostname().c_str());
+  WiFi.setHostname(deviceHostname().c_str());
   WiFi.setSleep(WIFI_PS_MIN_MODEM);        // modem-sleep: rádio spí mezi beacony = nižší odběr
   WiFi.setTxPower(WIFI_TX_POWER);          // snížit hned po nastavení módu
   WiFi.setAutoReconnect(true);
@@ -1777,7 +1776,6 @@ void setupWifiAndWeb() {
   server.on("/api/events", handleEvents);
   server.begin();
   bindSnmpUdp();
-  if (MDNS.begin(mdnsHostname().c_str())) MDNS.addService("http", "tcp", 80);   // -> http://<název>.local
   lastWifiOkMs = millis();
 }
 
