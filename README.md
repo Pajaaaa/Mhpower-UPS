@@ -80,19 +80,27 @@ děliči.
 ## Hardware a zapojení
 
 - **ESP32** (DevKit / WROOM).
-- Displej MHpower s budičem **TM1640**.
+- Displej MHpower s budičem **TM1640** (sběrnice běží na 5 V).
+- **74LVC14A** — hex Schmittův invertor jako oddělovací buffer (napájený z **3,3 V**).
 
-| TM1640 | → | ESP32 |
-|--------|---|-------|
-| CLK | přes dělič napětí | **GPIO18** |
-| DIN | přes dělič napětí | **GPIO23** |
-| GND | přímo | **GND** |
+Sběrnice se nepřipojuje přímo ani přes pouhý dělič, ale přes **Schmittův invertor 74LVC14A**.
+Ten dělá dvě věci najednou: **level‑shift 5 V → 3,3 V** (vstupy LVC jsou 5V‑tolerantní, čip
+napájený z 3V3 dává na výstupu bezpečnou 3,3V logiku) a **vyčistí hrany hysterezí** (klíčové
+u dlouhých/rušených vodičů — zašuměné hrany byly příčina dřívějšího nespolehlivého čtení).
 
-> ⚠️ Linky displeje mohou být na vyšší úrovni než 3,3 V — **použij odporový dělič**, ať
-> nezničíš vstupy ESP32. Zem musí být společná.
+| signál | cesta |
+|--------|-------|
+| TM1640 **CLK** | → 1 kΩ → 74LVC14 **pin 1 (1A)**; **pin 2 (1Y)** → 100 Ω → ESP32 **GPIO18** |
+| TM1640 **DIN** | → 1 kΩ → 74LVC14 **pin 3 (2A)**; **pin 4 (2Y)** → 100 Ω → ESP32 **GPIO23** |
+| napájení | 74LVC14 **pin 14 (VCC)** → ESP32 **3V3**; **pin 7 (GND)** → GND; blokovací **100 nF** VCC–GND |
+| zem | společná: GND displeje + ESP32 + pin 7 |
 
-Schémata zapojení: [`docs/zapojeni_spravne.png`](docs/zapojeni_spravne.png),
-[`docs/zapojeni_chip.png`](docs/zapojeni_chip.png).
+> Použita jsou jen **2 hradla ze 6**, zbylé vstupy klidně uzemni. Signály vyjdou z invertoru
+> **invertované** — nevadí, firmware si polaritu (edge + invert) při dekódování najde sám.
+> Napájení displeje zůstává **5 V**, mění se jen úroveň datových linek.
+
+Schémata: [`docs/zapojeni_spravne.png`](docs/zapojeni_spravne.png) (celé zapojení),
+[`docs/zapojeni_chip.png`](docs/zapojeni_chip.png) (detail pinů 74LVC14).
 
 ---
 

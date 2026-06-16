@@ -1,10 +1,12 @@
 /*
   MHpower MPU display monitor - ESP32 serial decoder.
 
-  Wiring:
-    TM1640 CLK -> divider -> ESP32 GPIO18
-    TM1640 DIN -> divider -> ESP32 GPIO23
-    Display GND -> ESP32 GND
+  Wiring (přes 74LVC14A - Schmittův invertor, napájený z 3V3):
+    TM1640 CLK -> 1k -> 74LVC14 pin1(1A); pin2(1Y) -> 100R -> ESP32 GPIO18
+    TM1640 DIN -> 1k -> 74LVC14 pin3(2A); pin4(2Y) -> 100R -> ESP32 GPIO23
+    74LVC14 pin14(VCC) -> ESP32 3V3; pin7(GND) -> GND; 100nF blok. C
+    Společná zem: displej + ESP32 + pin7. Displej zůstává na 5 V.
+    Signály vyjdou invertované - firmware si edge+invert najde sám.
 
   Serial monitor: 115200 baud
 */
