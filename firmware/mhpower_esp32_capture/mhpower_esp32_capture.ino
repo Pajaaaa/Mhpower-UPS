@@ -19,14 +19,23 @@
 #include <Preferences.h>
 #include <soc/gpio_struct.h>
 #include <esp_system.h>
+#include <esp_task_wdt.h>
+#include <ESPmDNS.h>
+#include <time.h>
 #include <math.h>
+
+#define USE_TASK_WDT 1
+const uint32_t WDT_TIMEOUT_S = 15;       // hardwarová pojistka proti zaseknutí
+const uint32_t WIFI_RETRY_MS = 15000;    // po této době bez WiFi zkusit reconnect
+const uint32_t WIFI_REBOOT_MS = 300000;  // po 5 min bez WiFi tvrdý restart
+const uint8_t  EVENT_LOG_SIZE = 16;      // kruhový log událostí
 
 const uint8_t PIN_CLK = 18;
 const uint8_t PIN_DIN = 23;
 const uint32_t FRAME_STALE_MS = 30000;
-const uint32_t CAPTURE_SAMPLES = 18000;
+const uint32_t CAPTURE_SAMPLES = 10000;   // ~192µs rámec se vejde; 18000 bylo zbytečně moc (RAM + delší okno bez přerušení)
 const uint32_t CAPTURE_TRIGGER_TIMEOUT_MS = 120;
-const uint32_t CAPTURE_INTERVAL_MS = 0;
+const uint32_t CAPTURE_INTERVAL_MS = 200;  // throttle: nesnímat naplno pořád, mezi pokusy nechat systém dýchat
 const uint8_t SOURCE_CONFIRM_FRAMES = 3;
 const uint16_t SNMP_PORT = 161;
 
@@ -128,8 +137,6 @@ struct RawDebugState {
 
 RawDebugState rawDebug;
 
-uint8_t parser[16];
-uint8_t parserLen = 0;
 
 uint8_t batteryHistory[8] = {0};
 uint8_t batteryHistoryPos = 0;
@@ -140,9 +147,6 @@ bool stableOnBattery = false;
 bool pendingOnBattery = false;
 uint8_t pendingSourceCount = 0;
 
-uint8_t bitCount = 0;
-uint8_t byteShift = 0;
-uint8_t lastClk = 0;
 uint8_t samples[CAPTURE_SAMPLES];
 bool batterySessionActive = false;
 uint32_t batterySessionStartMs = 0;
@@ -158,6 +162,49 @@ uint32_t lastSnmpBindMs = 0;
 // --- diagnostika běhu (kvůli ladění výpadků/restartů bez sériáku) ---
 esp_reset_reason_t bootResetReason = ESP_RST_UNKNOWN;
 uint32_t minFreeHeapBoot = 0;
+
+// --- WiFi dohled (aktivní reconnect + pojistka restartem) ---
+uint32_t lastWifiOkMs = 0;
+uint32_t lastWifiRetryMs = 0;
+
+// --- kruhový log událostí (výpadky sítě, baterie, alarmy) ---
+struct LogEvent { uint32_t epoch; uint32_t uptime; char msg[28]; };
+LogEvent eventLog[EVENT_LOG_SIZE];
+uint8_t eventCount = 0;
+uint8_t eventHead = 0;
+
+uint32_t nowEpoch() {
+  time_t t = time(nullptr);
+  return t > 1700000000UL ? (uint32_t)t : 0;   // > 2023 => NTP synchronizováno
+}
+void logEvent(const char* msg) {
+  LogEvent &e = eventLog[eventHead];
+  e.epoch = nowEpoch();
+  e.uptime = millis() / 1000UL;
+  strncpy(e.msg, msg, sizeof(e.msg) - 1);
+  e.msg[sizeof(e.msg) - 1] = 0;
+  eventHead = (eventHead + 1) % EVENT_LOG_SIZE;
+  if (eventCount < EVENT_LOG_SIZE) eventCount++;
+}
+
+// zaznamenej přechody stavů do logu
+void detectEvents() {
+  static bool init = false, pMains = true, pOver = false, pLow = false, pCrit = false, pOvl = false;
+  if (!init) {
+    init = true;
+    pMains = state.mainsPresent; pOver = state.overheat; pLow = state.lowBattery;
+    pCrit = state.criticalBattery; pOvl = state.overload;
+    return;
+  }
+  if (state.mainsPresent && !pMains) logEvent("Síť obnovena");
+  if (!state.mainsPresent && pMains) logEvent("Výpadek sítě");
+  if (state.overheat && !pOver) logEvent("Přehřátí");
+  if (state.lowBattery && !pLow) logEvent("Nízká baterie");
+  if (state.criticalBattery && !pCrit) logEvent("Kritická baterie");
+  if (state.overload && !pOvl) logEvent("Přetížení");
+  pMains = state.mainsPresent; pOver = state.overheat; pLow = state.lowBattery;
+  pCrit = state.criticalBattery; pOvl = state.overload;
+}
 
 // --- ukotvení výdrže na dílky baterie: naučená energie [Wh] na každý dílek 0..5 ---
 // index = počet dílků, který se právě vybíjí (energie spotřebovaná, než dílek zhasne)
@@ -691,28 +738,7 @@ void updateDecodedState(const uint8_t* mem, uint8_t brightness) {
   state.healthWarning = state.batteryHealthPercent < settings.healthWarnPercent;
   state.runtimeWarning = state.onBattery && state.runtimeRemainingEstimateSec >= 0 &&
                          state.runtimeRemainingEstimateSec < (int32_t)settings.minRuntimeMinutes * 60;
-}
-
-void feedByte(uint8_t b) {
-  state.byteCount++;
-
-  if (parserLen >= sizeof(parser)) parserLen = 0;
-  parser[parserLen++] = b;
-
-  while (parserLen > 0 && parser[0] != 0x40) {
-    memmove(parser, parser + 1, --parserLen);
-  }
-
-  if (parserLen >= 13) {
-    if (parser[0] == 0x40 && parser[1] == 0xC0 && (parser[12] & 0xF0) == 0x80) {
-      updateDecodedState(&parser[2], parser[12]);
-    } else if (parser[0] == 0xC0 && (parser[11] & 0xF0) == 0x80) {
-      updateDecodedState(&parser[1], parser[11]);
-    } else {
-      state.decodeErrors++;
-    }
-    parserLen = 0;
-  }
+  detectEvents();
 }
 
 bool waitForClockActivity() {
@@ -975,6 +1001,8 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       <div class="tile"><div class="label">Diagnostika</div><div class="small" id="diag"></div></div>
     </section>
     <div class="status" id="pills"></div>
+    <h2 class="label" style="margin:18px 0 8px;font-size:14px">Poslední události</h2>
+    <div id="events" class="small"></div>
     <div class="footer">Pavel Vlcek v1.0 hkfree.org</div>
   </main>
   <script>
@@ -983,6 +1011,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     function fmtTime(sec){if(sec===null||sec===undefined||sec<0)return '-';sec=Math.floor(sec);const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;if(h>0)return h+':'+String(m).padStart(2,'0')+' h';if(m>0)return m+':'+String(s).padStart(2,'0')+' min';return s+' s'}
     function pill(text,cls=''){return `<span class="pill ${cls}">${text}</span>`}
     function bars(id,count,max,cls){const el=document.getElementById(id);let html='',c=Number.isFinite(count)?count:0;for(let i=1;i<=max;i++){let on=i<=c,hot=cls==='load'&&count>=max;html+=`<span class="bar ${cls||''} ${on?'on':''} ${hot&&on?'hot':''}"></span>`}el.innerHTML=html}
+    async function renderEvents(){try{const r=await fetch('/api/events',{cache:'no-store'});const j=await r.json();let h='';for(const e of j.events){const t=e.epoch>0?new Date(e.epoch*1000).toLocaleString('cs-CZ'):('běh '+fmtTime(e.uptime));h+=`<div>${t} — ${e.msg}</div>`}document.getElementById('events').innerHTML=h||'<div>žádné události</div>'}catch(e){}}
     async function tick(){let j;try{const r=await fetch('/api/status',{cache:'no-store'});j=await r.json()}catch(e){j={online:false,error:String(e)}}
       input.textContent=val(j.inputVoltage);output.textContent=val(j.outputVoltage);freq.textContent=val(j.frequencyHz);
       if(j.settings&&j.settings.sourceWatts){modelWatts.textContent=j.settings.sourceWatts;pageTitle.textContent='Monitoring zdroje MHpower '+j.settings.sourceWatts+'W'}
@@ -996,7 +1025,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       const batHealth=j.batteryHealthPercent!==undefined?j.batteryHealthPercent:'-';
       batteryText.textContent=(j.overheat?'teplotní alarm':(j.criticalBattery?'kritický stav před vypnutím':(j.charging?'nabíjení':((j.batteryState||'')+(j.batteryVoltageEstimate!==null&&j.batteryVoltageEstimate!==undefined?' / '+Number(j.batteryVoltageEstimate).toFixed(1)+' V':'')))))+' / '+batAh+' Ah / zdraví '+batHealth+' %';loadText.textContent=j.loadState||'';
       rssi.textContent=signed(j.rssi);ip.innerHTML='IP '+(j.ip||'-')+'<br>maska '+(j.mask||'-')+'<br>brána '+(j.gw||'-')+'<br>DNS '+(j.dns||'-');diag.textContent='rámců '+val(j.frames)+' / heap '+val(j.freeHeap)+' (min '+val(j.minFreeHeap)+', blok '+val(j.maxAllocHeap)+') / err '+val(j.errors)+' / filtr '+val(j.filtered)+' / cap '+val(j.captureOk)+' / tout '+val(j.captureTimeouts)+' | běh '+fmtTime(j.uptimeSec)+' / reset: '+(j.resetReason||'?')+' / TX '+(j.txPowerDbm!==undefined?Number(j.txPowerDbm).toFixed(1)+' dBm':'?')+' / CPU '+val(j.cpuMhz)+' MHz / dílky '+val(j.barsLearned)+'/5'+(j.learnedUsableWh?' ('+val(j.learnedUsableWh)+' Wh)':'');
-      let ps='';ps+=pill(j.mainsPresent?'Síť přítomna':'Bez sítě',j.mainsPresent?'good':'bad');if(j.onBattery)ps+=pill('BĚH NA BATERII','bad');if(j.overheat)ps+=pill('PŘEHŘÁTÍ','bad');if(j.criticalBattery)ps+=pill('BATERIE 0 %','bad');if(j.charging)ps+=pill('Nabíjení','good');if(j.batteryFull)ps+=pill('Baterie plná','good');if(j.lowBattery)ps+=pill('Nízká baterie','bad');if(j.overload)ps+=pill('Přetížení','bad');if(j.alarm&&!j.overheat)ps+=pill('Alarm','bad');if(j.healthWarning)ps+=pill('Kondice baterie nízká','warn');if(j.runtimeWarning)ps+=pill('Výdrž pod limitem','warn');pills.innerHTML=ps}
+      let ps='';ps+=pill(j.mainsPresent?'Síť přítomna':'Bez sítě',j.mainsPresent?'good':'bad');if(j.onBattery)ps+=pill('BĚH NA BATERII','bad');if(j.overheat)ps+=pill('PŘEHŘÁTÍ','bad');if(j.criticalBattery)ps+=pill('BATERIE 0 %','bad');if(j.charging)ps+=pill('Nabíjení','good');if(j.batteryFull)ps+=pill('Baterie plná','good');if(j.lowBattery)ps+=pill('Nízká baterie','bad');if(j.overload)ps+=pill('Přetížení','bad');if(j.alarm&&!j.overheat)ps+=pill('Alarm','bad');if(j.healthWarning)ps+=pill('Kondice baterie nízká','warn');if(j.runtimeWarning)ps+=pill('Výdrž pod limitem','warn');pills.innerHTML=ps;renderEvents()}
     setInterval(tick,3000);tick();
   </script>
 </body>
@@ -1154,7 +1183,7 @@ void handleSettings() {
     }
     if (server.hasArg("pass")) {
       String v = server.arg("pass");
-      if (v.length() < sizeof(settings.wifiPass)) {
+      if (v.length() > 0 && v.length() < sizeof(settings.wifiPass)) {   // prázdné = beze změny
         strncpy(settings.wifiPass, v.c_str(), sizeof(settings.wifiPass) - 1);
         settings.wifiPass[sizeof(settings.wifiPass) - 1] = 0;
       }
@@ -1230,12 +1259,10 @@ void handleSettings() {
   html += escHtml(settings.deviceName);
   html += F("'></div><div class='field'><label>Wi-Fi SSID</label><input name='ssid' maxlength='32' value='");
   html += escHtml(settings.wifiSsid);
-  html += F("'></div><div class='field'><label>Wi-Fi heslo</label><input name='pass' maxlength='64' type='password' value='");
-  html += escHtml(settings.wifiPass);
+  html += F("'></div><div class='field'><label>Wi-Fi heslo</label><input name='pass' maxlength='64' type='password' placeholder='(beze změny)' value='");
   html += F("'></div><div class='field'><label>Web uživatel</label><input name='webUser' maxlength='16' value='");
   html += escHtml(settings.webUser);
-  html += F("'></div><div class='field'><label>Web heslo</label><input name='webPass' maxlength='32' type='password' value='");
-  html += escHtml(settings.webPass);
+  html += F("'></div><div class='field'><label>Web heslo</label><input name='webPass' maxlength='32' type='password' placeholder='(beze změny)' value='");
   html += F("'></div><div class='field'><label>SNMP community</label><input name='snmp' maxlength='32' value='");
   html += escHtml(settings.snmpCommunity);
   html += F("'></div></section>");
@@ -1331,7 +1358,7 @@ void handleUpdateDone() {
 
 const uint32_t SNMP_BASE_OID[] = {1, 3, 6, 1, 4, 1, 53864, 1, 1};
 const uint8_t SNMP_BASE_LEN = sizeof(SNMP_BASE_OID) / sizeof(SNMP_BASE_OID[0]);
-const uint8_t SNMP_MAX_INDEX = 38;
+const uint8_t SNMP_MAX_INDEX = 44;
 
 bool readBerLen(const uint8_t* data, int total, int& pos, int& len) {
   if (pos >= total) return false;
@@ -1505,6 +1532,12 @@ bool getSnmpValue(uint8_t idx, SnmpValue& value) {
     case 36: value.integer = age == 0xFFFFFFFFUL ? -1 : (int32_t)age; break;
     case 37: value.integer = state.healthWarning ? 1 : 0; break;
     case 38: value.integer = state.runtimeWarning ? 1 : 0; break;
+    case 39: value.integer = (int32_t)(millis() / 1000UL); break;          // uptime [s]
+    case 40: value.integer = (int32_t)ESP.getMinFreeHeap(); break;          // min volný heap [B]
+    case 41: value.integer = (int32_t)ESP.getMaxAllocHeap(); break;         // největší volný blok [B]
+    case 42: value.type = 0x04; strncpy(value.text, resetReasonStr(bootResetReason), sizeof(value.text) - 1); break;  // důvod restartu
+    case 43: value.integer = (int32_t)(WiFi.getTxPower() * 10 / 4); break;  // TX výkon [dBm×10]
+    case 44: value.integer = (int32_t)getCpuFrequencyMhz(); break;          // takt CPU [MHz]
     default: return false;
   }
   value.text[sizeof(value.text) - 1] = 0;
@@ -1654,9 +1687,73 @@ void keepSnmpUdpAlive() {
 // Možnosti: WIFI_POWER_19_5dBm (max) … 15 / 13 / 11 / 8_5 / 7 / 5 / 2 / MINUS_1dBm (min).
 const wifi_power_t WIFI_TX_POWER = WIFI_POWER_5dBm;
 
+void onWifiEvent(WiFiEvent_t event) {
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      lastWifiOkMs = millis();
+      bindSnmpUdp();
+      Serial.printf("[WiFi] IP %s\n", WiFi.localIP().toString().c_str());
+      break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      Serial.println("[WiFi] odpojeno");
+      break;
+    default: break;
+  }
+}
+
+// aktivní dohled: po WIFI_RETRY_MS reconnect, po WIFI_REBOOT_MS tvrdý restart
+void maintainWifi() {
+  const uint32_t now = millis();
+  if (WiFi.status() == WL_CONNECTED) { lastWifiOkMs = now; return; }
+  if (lastWifiOkMs == 0) lastWifiOkMs = now;
+  if (now - lastWifiOkMs > WIFI_REBOOT_MS) {
+    Serial.println("[WiFi] >5 min bez WiFi -> restart");
+    delay(50);
+    ESP.restart();
+  }
+  if (now - lastWifiRetryMs > WIFI_RETRY_MS) {
+    lastWifiRetryMs = now;
+    Serial.println("[WiFi] reconnect...");
+    WiFi.disconnect();
+    WiFi.begin(settings.wifiSsid, settings.wifiPass);
+  }
+}
+
+void sendEventsJson() {
+  int n = snprintf(responseBody, sizeof(responseBody), "{\"ntp\":%s,\"events\":[", nowEpoch() ? "true" : "false");
+  for (uint8_t i = 0; i < eventCount; i++) {
+    const uint8_t idx = (uint8_t)((eventHead + EVENT_LOG_SIZE - 1 - i) % EVENT_LOG_SIZE);  // nejnovější první
+    const LogEvent &e = eventLog[idx];
+    n += snprintf(responseBody + n, sizeof(responseBody) - n, "%s{\"epoch\":%lu,\"uptime\":%lu,\"msg\":\"%s\"}",
+                  i ? "," : "", (unsigned long)e.epoch, (unsigned long)e.uptime, e.msg);
+    if (n > (int)sizeof(responseBody) - 120) break;
+  }
+  snprintf(responseBody + n, sizeof(responseBody) - n, "]}");
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", responseBody);
+}
+void handleEvents() {
+  if (!requireAuth()) return;
+  sendEventsJson();
+}
+
+// hostname pro mDNS/DHCP: z deviceName ponech jen [a-z0-9-], jinak "mhpower"
+String mdnsHostname() {
+  String h;
+  for (const char* p = settings.deviceName; *p; p++) {
+    char c = *p;
+    if (c >= 'A' && c <= 'Z') c += 32;
+    if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') h += c;
+  }
+  if (h.length() == 0) h = "mhpower";
+  return h;
+}
+
 void setupWifiAndWeb() {
   WiFi.persistent(false);
+  WiFi.onEvent(onWifiEvent);
   WiFi.mode(WIFI_STA);
+  WiFi.setHostname(mdnsHostname().c_str());
   WiFi.setSleep(WIFI_PS_MIN_MODEM);        // modem-sleep: rádio spí mezi beacony = nižší odběr
   WiFi.setTxPower(WIFI_TX_POWER);          // snížit hned po nastavení módu
   WiFi.setAutoReconnect(true);
@@ -1675,8 +1772,11 @@ void setupWifiAndWeb() {
   server.on("/restart", HTTP_POST, handleRestart);
   server.on("/update", HTTP_GET, handleUpdatePage);
   server.on("/update", HTTP_POST, handleUpdateDone, handleUpdateUpload);
+  server.on("/api/events", handleEvents);
   server.begin();
   bindSnmpUdp();
+  if (MDNS.begin(mdnsHostname().c_str())) MDNS.addService("http", "tcp", 80);   // -> http://<název>.local
+  lastWifiOkMs = millis();
 }
 
 void setup() {
@@ -1686,18 +1786,36 @@ void setup() {
   setCpuFrequencyMhz(160);   // 240->160 MHz: nižší odběr; WiFi i capture v pohodě
   btStop();                  // Bluetooth nepoužíváme -> vypnout řadič (pár mA)
 
+#if USE_TASK_WDT
+  #if ESP_ARDUINO_VERSION_MAJOR >= 3
+  esp_task_wdt_config_t twdt = {};
+  twdt.timeout_ms = WDT_TIMEOUT_S * 1000;
+  twdt.idle_core_mask = 0;
+  twdt.trigger_panic = true;
+  esp_task_wdt_init(&twdt);
+  #else
+  esp_task_wdt_init(WDT_TIMEOUT_S, true);
+  #endif
+  esp_task_wdt_add(NULL);   // hlídej loop task -> při zaseknutí čistý reboot
+#endif
+
   pinMode(PIN_CLK, INPUT);
   pinMode(PIN_DIN, INPUT);
-  lastClk = readPins() & 1;
 
   delay(300);
   Serial.printf("\n[BOOT] reset=%s heap=%u\n", resetReasonStr(bootResetReason), ESP.getFreeHeap());
   loadSettings();
   setupWifiAndWeb();
+  configTime(0, 0, "pool.ntp.org", "time.google.com");   // NTP (UTC) pro časové značky událostí
+  logEvent("Start zařízení");
   minFreeHeapBoot = ESP.getFreeHeap();
 }
 
 void loop() {
+#if USE_TASK_WDT
+  esp_task_wdt_reset();
+#endif
+  maintainWifi();
   keepSnmpUdpAlive();
   server.handleClient();
   handleSnmpBurst();
@@ -1708,15 +1826,21 @@ void loop() {
     delay(1);
     return;
   }
-  if (captureFast()) {
-    state.captureOk++;
-    state.lastCaptureMs = millis();
-    decodeCapture();
+  const uint32_t now = millis();
+  if (now - lastCaptureAttemptMs >= CAPTURE_INTERVAL_MS) {   // throttle snímání
+    lastCaptureAttemptMs = now;
+    if (captureFast()) {
+      state.captureOk++;
+      state.lastCaptureMs = millis();
+      decodeCapture();
+    } else {
+      state.captureTimeouts++;
+    }
+    server.handleClient();
+    handleSnmpBurst();
   } else {
-    state.captureTimeouts++;
+    delay(10);   // mezi snímky nech systém dýchat (nižší spin i odběr)
   }
-  server.handleClient();
-  handleSnmpBurst();
 
   delay(1);   // pustí IDLE task a nakrmí watchdog (delay(0) na ESP32 NEpouští)
 }

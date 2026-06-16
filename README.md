@@ -69,11 +69,15 @@ děliči.
 - **Webový dashboard** (auto‑refresh): vstup/výstup, síť/baterie, zátěž, výkon, alarmy,
   výdrž na baterii, kondice baterie.
 - **Odhad výdrže** s učením energie na jednotlivé dílky baterie (viz níže).
-- **SNMP v1** (UDP/161) — 38 OID pro integraci do monitoringu (Zabbix, LibreNMS, …).
+- **SNMP v1** (UDP/161) — 44 OID pro integraci do monitoringu (Zabbix, LibreNMS, …).
 - **OTA aktualizace** firmwaru přes web (s progress barem).
 - **Diagnostika běhu** — důvod posledního restartu, uptime, heap, fragmentace, TX výkon,
   takt CPU (kvůli ladění výpadků bez sériáku).
-- **Úsporný režim** — snížený WiFi výkon, WiFi modem‑sleep, CPU 160 MHz, vypnutý Bluetooth.
+- **Log událostí** — kruhový log (výpadky sítě, baterie, alarmy) s NTP časem, `/api/events` i ve webu.
+- **WiFi dohled** — aktivní reconnect, po 5 min bez WiFi tvrdý restart; **task watchdog** proti zaseknutí.
+- **mDNS** — dostupné na `http://<název>.local` bez znalosti IP.
+- **Úsporný režim** — snížený WiFi výkon, WiFi modem‑sleep, CPU 160 MHz, vypnutý Bluetooth,
+  throttle snímání (nesnímá naplno pořád).
 
 ---
 
@@ -218,6 +222,9 @@ Base OID: **`1.3.6.1.4.1.53864.1.1`**, dotazuj se `…1.1.<index>.0` (GET i GETN
 | 18 | int | volný heap [B] | 37 | int | varování kondice (1/0) |
 | 19 | int | počet rámců | 38 | int | varování výdrže (1/0) |
 
+Diagnostické OID (39–44): **39** uptime [s], **40** min volný heap [B], **41** největší volný blok [B],
+**42** (str) důvod restartu, **43** WiFi TX výkon [dBm×10], **44** takt CPU [MHz].
+
 Příklad: `snmpwalk -v1 -c public <IP> 1.3.6.1.4.1.53864.1.1`
 
 ---
@@ -236,6 +243,11 @@ Klíčové je pole **`reset:`** (z `esp_reset_reason()`):
 
 `běh` (uptime) odliší restart (skočí na 0) od pouhého výpadku WiFi (uptime běží dál).
 `minFreeHeap` a `maxAllocHeap` odhalí únik paměti / fragmentaci.
+
+**Samoléčení:** WiFi se aktivně hlídá — po 15 s bez spojení se zkusí reconnect, po 5 min bez
+WiFi přijde tvrdý restart. **Task watchdog** (15 s) provede čistý reboot, kdyby se smyčka
+zasekla. Přehled posledních událostí (výpadky sítě, běhy na baterii, alarmy) je v sekci
+**Poslední události** na monitoru a strojově na `/api/events` (s NTP časem, pokud je synchronizovaný).
 
 ---
 
