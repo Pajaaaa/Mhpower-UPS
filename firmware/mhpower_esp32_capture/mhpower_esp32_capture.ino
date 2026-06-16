@@ -45,6 +45,8 @@ const float BATTERY_USABLE_FRACTION = 0.85f;   // podíl kapacity využitelný d
 const float PEUKERT_K = 1.15f;                 // Peukertův exponent olověné baterie
 const float PEUKERT_REF_HOURS = 20.0f;         // jmenovitá kapacita platí při C20
 const uint32_t ENERGY_DT_MAX_MS = 5000UL;      // strop kroku integrace energie
+const float INVERTER_EFFICIENCY = 0.85f;       // účinnost měniče (napevno)
+const uint16_t INVERTER_IDLE_W = 20;           // vlastní spotřeba měniče [W] (napevno)
 
 WebServer server(80);
 WiFiUDP snmpUdp;
@@ -63,8 +65,6 @@ struct AppSettings {
   char batteryInstallDate[11] = "2026-06-04";
   uint8_t healthWarnPercent = 60;
   uint16_t minRuntimeMinutes = 10;
-  float inverterEfficiency = 0.85;   // účinnost měniče (0,5–1,0)
-  uint16_t inverterIdleW = 20;       // vlastní spotřeba měniče [W]
   char snmpCommunity[33] = "public";
   char ntpServer[48] = "pool.ntp.org";
 };
@@ -272,10 +272,6 @@ void loadSettings() {
   settings.batteryInstallDate[sizeof(settings.batteryInstallDate) - 1] = 0;
   settings.healthWarnPercent = prefs.getUChar("health", settings.healthWarnPercent);
   settings.minRuntimeMinutes = prefs.getUShort("minRun", settings.minRuntimeMinutes);
-  settings.inverterEfficiency = prefs.getFloat("invEff", settings.inverterEfficiency);
-  if (settings.inverterEfficiency < 0.5f || settings.inverterEfficiency > 1.0f) settings.inverterEfficiency = 0.85f;
-  settings.inverterIdleW = prefs.getUShort("invIdle", settings.inverterIdleW);
-  if (settings.inverterIdleW > 200) settings.inverterIdleW = 20;
   if (prefs.getBytesLength("whBar") == sizeof(learnedWhPerBar)) {
     prefs.getBytes("whBar", learnedWhPerBar, sizeof(learnedWhPerBar));
   }
@@ -319,8 +315,6 @@ void saveSettings() {
   prefs.putString("batDate", settings.batteryInstallDate);
   prefs.putUChar("health", settings.healthWarnPercent);
   prefs.putUShort("minRun", settings.minRuntimeMinutes);
-  prefs.putFloat("invEff", settings.inverterEfficiency);
-  prefs.putUShort("invIdle", settings.inverterIdleW);
   prefs.end();
 }
 
@@ -390,9 +384,7 @@ float nominalUsableBatteryWh() {
 float batteryDrainWatts() {
   if (!state.onBattery || state.outputVoltage <= 0) return 0.0f;
   const float out = state.loadWattsEstimate > 0 ? (float)state.loadWattsEstimate : 0.0f;
-  float eff = settings.inverterEfficiency;
-  if (eff < 0.5f || eff > 1.0f) eff = 0.85f;
-  return out / eff + (float)settings.inverterIdleW;
+  return out / INVERTER_EFFICIENCY + (float)INVERTER_IDLE_W;
 }
 
 // využitelná energie po korekci na vybíjecí proud (Peukert)
@@ -1235,14 +1227,6 @@ void handleSettings() {
       const int v = server.arg("minRun").toInt();
       if (v >= 1 && v <= 1440) settings.minRuntimeMinutes = (uint16_t)v;
     }
-    if (server.hasArg("invEff")) {
-      const int v = server.arg("invEff").toInt();
-      if (v >= 50 && v <= 100) settings.inverterEfficiency = (float)v / 100.0f;
-    }
-    if (server.hasArg("invIdle")) {
-      const int v = server.arg("invIdle").toInt();
-      if (v >= 0 && v <= 200) settings.inverterIdleW = (uint16_t)v;
-    }
     if (fabs(settings.batteryAh - oldBatteryAh) > 0.05f || strcmp(settings.batteryInstallDate, oldBatteryDate) != 0) {
       settings.batteryHealthFactor = 1.0f;
       state.batteryHealthPercent = 100;
@@ -1302,12 +1286,8 @@ void handleSettings() {
   html += escHtml(settings.batteryInstallDate);
   html += F("'></div></section>");
 
-  html += F("<h2 class='sectionTitle'>Měnič a výdrž</h2><section class='grid'>");
-  html += F("<div class='field'><label>Účinnost měniče %</label><input name='invEff' type='number' min='50' max='100' value='");
-  html += (uint16_t)(settings.inverterEfficiency * 100.0f + 0.5f);
-  html += F("'></div><div class='field'><label>Vlastní spotřeba měniče W</label><input name='invIdle' type='number' min='0' max='200' value='");
-  html += settings.inverterIdleW;
-  html += F("'></div><div class='field'><label>Minimální výdrž minut</label><input name='minRun' type='number' min='1' max='1440' value='");
+  html += F("<h2 class='sectionTitle'>Výdrž a varování</h2><section class='grid'>");
+  html += F("<div class='field'><label>Minimální výdrž minut</label><input name='minRun' type='number' min='1' max='1440' value='");
   html += settings.minRuntimeMinutes;
   html += F("'></div><div class='field'><label>Varování zdraví baterie pod %</label><input name='health' type='number' min='1' max='100' value='");
   html += settings.healthWarnPercent;

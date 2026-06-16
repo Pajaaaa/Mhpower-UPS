@@ -154,7 +154,7 @@ hodnoty v kódu slouží jen jako výchozí při čistém zařízení.
 
 - `/` — **monitor** (dlaždice, auto‑refresh přes `/api/status`).
 - `/settings` — **systém**: pojmenování, WiFi, web login, SNMP community, **NTP server**, typ zdroje
-  (300/500/700/800 W), kapacita a datum instalace baterie, účinnost a klid měniče,
+  (300/500/700/800 W), kapacita a datum instalace baterie,
   minimální výdrž, práh kondice; OTA a restart.
 - `/api/status` — JSON se všemi hodnotami (chráněno HTTP Basic auth).
 
@@ -183,6 +183,8 @@ reálný odběr  = výstupní výkon / účinnost měniče + klidová spotřeba 
 kapacita      = korigovaná Peukertem podle vybíjecího proudu (k = 1,15, C20)
 ```
 plus učení kondice z plných výbojů (EMA) a klouzavý průměr odběru pro stabilní odhad.
+Účinnost měniče (0,85) a klidová spotřeba (20 W) jsou napevno v kódu
+(`INVERTER_EFFICIENCY` / `INVERTER_IDLE_W`), ne v nastavení.
 
 **2) Ukotvení na dílky (přesnější, učí se za běhu)** — měnič sám zná reálné napětí, proud
 i teplotu a jeho výsledkem jsou **dílky baterie**. Firmware měří, **kolik reálné energie
