@@ -33,7 +33,7 @@ const uint8_t  EVENT_LOG_SIZE = 16;      // kruhový log událostí
 const uint8_t PIN_CLK = 18;
 const uint8_t PIN_DIN = 23;
 const uint32_t FRAME_STALE_MS = 30000;
-const uint32_t CAPTURE_SAMPLES = 10000;   // ~192µs rámec se vejde; 18000 bylo zbytečně moc (RAM + delší okno bez přerušení)
+const uint32_t CAPTURE_SAMPLES = 18000;   // při 160 MHz ~290µs okno = rezerva nad 192µs rámec (10000 ořezávalo -> err)
 const uint32_t CAPTURE_TRIGGER_TIMEOUT_MS = 120;
 const uint32_t CAPTURE_INTERVAL_MS = 200;  // throttle: nesnímat naplno pořád, mezi pokusy nechat systém dýchat
 const uint8_t SOURCE_CONFIRM_FRAMES = 3;
