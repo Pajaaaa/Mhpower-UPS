@@ -190,11 +190,13 @@ void logEvent(const char* msg) {
 
 // zaznamenej přechody stavů do logu
 void detectEvents() {
-  static bool init = false, pMains = true, pOver = false, pLow = false, pCrit = false, pOvl = false;
+  static bool init = false, pMains = true, pOver = false, pLow = false, pCrit = false, pOvl = false,
+              pHealth = false, pRun = false;
   if (!init) {
     init = true;
     pMains = state.mainsPresent; pOver = state.overheat; pLow = state.lowBattery;
     pCrit = state.criticalBattery; pOvl = state.overload;
+    pHealth = state.healthWarning; pRun = state.runtimeWarning;
     return;
   }
   if (state.mainsPresent && !pMains) logEvent("Síť obnovena");
@@ -203,8 +205,11 @@ void detectEvents() {
   if (state.lowBattery && !pLow) logEvent("Nízká baterie");
   if (state.criticalBattery && !pCrit) logEvent("Kritická baterie");
   if (state.overload && !pOvl) logEvent("Přetížení");
+  if (state.healthWarning && !pHealth) logEvent("Kondice baterie pod prahem");
+  if (state.runtimeWarning && !pRun) logEvent("Výdrž pod limitem");
   pMains = state.mainsPresent; pOver = state.overheat; pLow = state.lowBattery;
   pCrit = state.criticalBattery; pOvl = state.overload;
+  pHealth = state.healthWarning; pRun = state.runtimeWarning;
 }
 
 // --- ukotvení výdrže na dílky baterie: naučená energie [Wh] na každý dílek 0..5 ---
