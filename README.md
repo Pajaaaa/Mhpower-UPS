@@ -153,7 +153,7 @@ hodnoty v kódu slouží jen jako výchozí při čistém zařízení.
 ## Webové rozhraní
 
 - `/` — **monitor** (dlaždice, auto‑refresh přes `/api/status`).
-- `/settings` — **systém**: pojmenování, WiFi, web login, SNMP community, typ zdroje
+- `/settings` — **systém**: pojmenování, WiFi, web login, SNMP community, **NTP server**, typ zdroje
   (300/500/700/800 W), kapacita a datum instalace baterie, účinnost a klid měniče,
   minimální výdrž, práh kondice; OTA a restart.
 - `/api/status` — JSON se všemi hodnotami (chráněno HTTP Basic auth).

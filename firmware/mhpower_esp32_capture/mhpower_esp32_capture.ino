@@ -66,6 +66,7 @@ struct AppSettings {
   float inverterEfficiency = 0.85;   // účinnost měniče (0,5–1,0)
   uint16_t inverterIdleW = 20;       // vlastní spotřeba měniče [W]
   char snmpCommunity[33] = "public";
+  char ntpServer[48] = "pool.ntp.org";
 };
 
 AppSettings settings;
@@ -255,6 +256,10 @@ void loadSettings() {
   strncpy(settings.snmpCommunity, community.c_str(), sizeof(settings.snmpCommunity) - 1);
   settings.snmpCommunity[sizeof(settings.snmpCommunity) - 1] = 0;
   if (settings.snmpCommunity[0] == 0) strncpy(settings.snmpCommunity, "public", sizeof(settings.snmpCommunity) - 1);
+  String ntp = prefs.getString("ntp", settings.ntpServer);
+  strncpy(settings.ntpServer, ntp.c_str(), sizeof(settings.ntpServer) - 1);
+  settings.ntpServer[sizeof(settings.ntpServer) - 1] = 0;
+  if (settings.ntpServer[0] == 0) strncpy(settings.ntpServer, "pool.ntp.org", sizeof(settings.ntpServer) - 1);
   settings.sourceWatts = prefs.getUShort("watts", settings.sourceWatts);
   if (settings.sourceWatts != 300 && settings.sourceWatts != 500 &&
       settings.sourceWatts != 700 && settings.sourceWatts != 800) {
@@ -307,6 +312,7 @@ void saveSettings() {
   prefs.putString("webUser", settings.webUser);
   prefs.putString("webPass", settings.webPass);
   prefs.putString("snmpComm", settings.snmpCommunity);
+  prefs.putString("ntp", settings.ntpServer);
   prefs.putUShort("watts", settings.sourceWatts);
   prefs.putFloat("batAh", settings.batteryAh);
   prefs.putFloat("batHealth", settings.batteryHealthFactor);
@@ -1196,6 +1202,15 @@ void handleSettings() {
         settings.snmpCommunity[sizeof(settings.snmpCommunity) - 1] = 0;
       }
     }
+    if (server.hasArg("ntp")) {
+      String v = server.arg("ntp");
+      v.trim();
+      if (v.length() > 0 && v.length() < sizeof(settings.ntpServer)) {
+        strncpy(settings.ntpServer, v.c_str(), sizeof(settings.ntpServer) - 1);
+        settings.ntpServer[sizeof(settings.ntpServer) - 1] = 0;
+        configTime(0, 0, settings.ntpServer, "time.google.com");   // hned přepnout NTP
+      }
+    }
     if (server.hasArg("watts")) {
       const uint16_t w = (uint16_t)server.arg("watts").toInt();
       if (w == 300 || w == 500 || w == 700 || w == 800) settings.sourceWatts = w;
@@ -1265,6 +1280,8 @@ void handleSettings() {
   html += F("'></div><div class='field'><label>Web heslo</label><input name='webPass' maxlength='32' type='password' placeholder='(beze změny)' value='");
   html += F("'></div><div class='field'><label>SNMP community</label><input name='snmp' maxlength='32' value='");
   html += escHtml(settings.snmpCommunity);
+  html += F("'></div><div class='field'><label>NTP server</label><input name='ntp' maxlength='47' value='");
+  html += escHtml(settings.ntpServer);
   html += F("'></div></section>");
 
   html += F("<h2 class='sectionTitle'>Zdroj a baterie</h2><section class='grid'>");
@@ -1806,7 +1823,7 @@ void setup() {
   Serial.printf("\n[BOOT] reset=%s heap=%u\n", resetReasonStr(bootResetReason), ESP.getFreeHeap());
   loadSettings();
   setupWifiAndWeb();
-  configTime(0, 0, "pool.ntp.org", "time.google.com");   // NTP (UTC) pro časové značky událostí
+  configTime(0, 0, settings.ntpServer, "time.google.com");   // NTP (UTC) pro časové značky událostí
   logEvent("Start zařízení");
   minFreeHeapBoot = ESP.getFreeHeap();
 }
