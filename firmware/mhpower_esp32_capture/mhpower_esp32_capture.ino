@@ -505,6 +505,7 @@ bool voltageLooksValid(int inputVoltage, int outputVoltage) {
 }
 
 void rememberBatteryPattern(uint8_t v) {
+  if (batteryBarsFrom09(v) == 255) return;   // do historie jen platné ikony – glitch dekódu nepouštět dál
   batteryHistory[batteryHistoryPos] = v;
   batteryHistoryPos = (batteryHistoryPos + 1) % sizeof(batteryHistory);
   if (batteryHistoryCount < sizeof(batteryHistory)) batteryHistoryCount++;
@@ -512,11 +513,15 @@ void rememberBatteryPattern(uint8_t v) {
 
 bool batteryPatternIsChanging() {
   if (batteryHistoryCount < 4) return false;
-  const uint8_t first = batteryHistory[0];
-  for (uint8_t i = 1; i < batteryHistoryCount; i++) {
-    if (batteryHistory[i] != first) return true;
+  // animace nabíjení = vzorek se reálně mění; jeden odskok v historii je glitch dekódu, ne animace.
+  // Za "měnící se" ber jen stav, kdy se od nejčastější hodnoty liší aspoň 2 vzorky.
+  uint8_t bestCount = 0;
+  for (uint8_t i = 0; i < batteryHistoryCount; i++) {
+    uint8_t c = 0;
+    for (uint8_t j = 0; j < batteryHistoryCount; j++) if (batteryHistory[j] == batteryHistory[i]) c++;
+    if (c > bestCount) bestCount = c;
   }
-  return false;
+  return (uint8_t)(batteryHistoryCount - bestCount) >= 2;
 }
 
 bool firstBatteryBarIsBlinking() {
