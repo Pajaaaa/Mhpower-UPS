@@ -197,6 +197,7 @@ Od tohoto bodu už vede historii **git**. Stručný přehled commitů:
 | `c1c4a54` | 17. 6. | **v1.4** (footer) |
 | `6eaaaeb` | 17. 6. | pojistka proti zaseknutému web serveru (`maintainWeb`) + **v1.5** |
 | `e2db484` | 17. 6. | OTA přežije odmítnutý/vadný upload (WDT fix) + **v1.6** |
+| `c53f99a` | 17. 6. | HW ID desky (MAC) na web + SNMP idx 45 — odlišení kusů v racku + **v1.7** |
 
 Dvě provozní věci z tohoto období:
 

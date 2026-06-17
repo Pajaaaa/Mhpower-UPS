@@ -291,7 +291,7 @@ tools/captures/            ukázkové záznamy sběrnice (.sr) + vysvětlení
 Jak projekt vznikal — reverse engineering displeje logickým analyzátorem, tři pokusy o hardware
 (Wemos → ATmega2560 → ESP32), odvození mapy displeje, boj se čtením sběrnice na ESP32 a finální
 odrušení Schmittovým invertorem — je sepsáno v [`docs/HISTORIE.md`](docs/HISTORIE.md).
-Obsahuje i přehled milníků verzí v1.0–v1.6.
+Obsahuje i přehled milníků verzí v1.0–v1.7.
 
 ---
 
