@@ -20,13 +20,15 @@
 #include <soc/gpio_struct.h>
 #include <esp_system.h>
 #include <esp_task_wdt.h>
+#include <ESPmDNS.h>
 #include <time.h>
 #include <math.h>
 
 #define USE_TASK_WDT 1
 const uint32_t WDT_TIMEOUT_S = 15;       // hardwarová pojistka proti zaseknutí
 const uint32_t WIFI_RETRY_MS = 15000;    // po této době bez WiFi zkusit reconnect
-const uint32_t WIFI_REBOOT_MS = 300000;  // po 5 min bez WiFi tvrdý restart
+const uint32_t WIFI_FALLBACK_MS = 300000;// po 5 min bez WiFi nahodit záchranný hotspot (AP)
+const char* const AP_FALLBACK_PASS = "mhpower-setup";  // WPA2 heslo hotspotu (min. 8 znaků)
 const uint8_t  EVENT_LOG_SIZE = 16;      // kruhový log událostí
 
 const uint8_t PIN_CLK = 18;
@@ -163,9 +165,10 @@ uint32_t lastSnmpBindMs = 0;
 esp_reset_reason_t bootResetReason = ESP_RST_UNKNOWN;
 uint32_t minFreeHeapBoot = 0;
 
-// --- WiFi dohled (aktivní reconnect + pojistka restartem) ---
+// --- WiFi dohled (aktivní reconnect + záchranný hotspot) ---
 uint32_t lastWifiOkMs = 0;
 uint32_t lastWifiRetryMs = 0;
+bool apFallbackActive = false;   // běží záchranný AP hotspot (WiFi se nepřipojila)
 
 // --- kruhový log událostí (výpadky sítě, baterie, alarmy) ---
 struct LogEvent { uint32_t epoch; uint32_t uptime; char msg[28]; };
@@ -1702,16 +1705,49 @@ void onWifiEvent(WiFiEvent_t event) {
   }
 }
 
-// aktivní dohled: po WIFI_RETRY_MS reconnect, po WIFI_REBOOT_MS tvrdý restart
+// SSID záchranného hotspotu: MHpower-<2 bajty MAC> (unikátní, rozpoznatelné)
+String apSsid() {
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  char buf[20];
+  snprintf(buf, sizeof(buf), "MHpower-%02X%02X", mac[4], mac[5]);
+  return String(buf);
+}
+
+// nahodí AP hotspot, ale STA nechá běžet (AP_STA) -> reconnect pokračuje na pozadí
+void startApFallback() {
+  if (apFallbackActive) return;
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP(apSsid().c_str(), AP_FALLBACK_PASS);
+  WiFi.setTxPower(WIFI_TX_POWER);
+  apFallbackActive = true;
+  Serial.printf("[WiFi] zachranny hotspot %s / %s -> http://%s\n",
+                apSsid().c_str(), AP_FALLBACK_PASS, WiFi.softAPIP().toString().c_str());
+  logEvent("Záchranný hotspot");
+}
+
+// STA se vrátila -> zruš AP a zpět do úsporného STA režimu (kvůli odběru/brownoutu)
+void stopApFallback() {
+  if (!apFallbackActive) return;
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+  WiFi.setTxPower(WIFI_TX_POWER);
+  apFallbackActive = false;
+  Serial.println("[WiFi] hotspot vypnut (STA obnovena)");
+  logEvent("Hotspot vypnut");
+}
+
+// aktivní dohled: po WIFI_RETRY_MS reconnect, po WIFI_FALLBACK_MS záchranný hotspot
 void maintainWifi() {
   const uint32_t now = millis();
-  if (WiFi.status() == WL_CONNECTED) { lastWifiOkMs = now; return; }
-  if (lastWifiOkMs == 0) lastWifiOkMs = now;
-  if (now - lastWifiOkMs > WIFI_REBOOT_MS) {
-    Serial.println("[WiFi] >5 min bez WiFi -> restart");
-    delay(50);
-    ESP.restart();
+  if (WiFi.status() == WL_CONNECTED) {
+    lastWifiOkMs = now;
+    if (apFallbackActive) stopApFallback();
+    return;
   }
+  if (lastWifiOkMs == 0) lastWifiOkMs = now;
+  // místo nekonečného restartu (ten by špatně zadanou WiFi nikdy neopravil) nahodíme hotspot
+  if (!apFallbackActive && now - lastWifiOkMs > WIFI_FALLBACK_MS) startApFallback();
   if (now - lastWifiRetryMs > WIFI_RETRY_MS) {
     lastWifiRetryMs = now;
     Serial.println("[WiFi] reconnect...");
@@ -1738,7 +1774,7 @@ void handleEvents() {
   sendEventsJson();
 }
 
-// DHCP hostname: z deviceName ponech jen [a-z0-9-], jinak "mhpower"
+// hostname pro mDNS i DHCP: z deviceName ponech jen [a-z0-9-], jinak "mhpower"
 String deviceHostname() {
   String h;
   for (const char* p = settings.deviceName; *p; p++) {
@@ -1776,7 +1812,9 @@ void setupWifiAndWeb() {
   server.on("/api/events", handleEvents);
   server.begin();
   bindSnmpUdp();
+  if (MDNS.begin(deviceHostname().c_str())) MDNS.addService("http", "tcp", 80);   // -> http://<název>.local
   lastWifiOkMs = millis();
+  if (WiFi.status() != WL_CONNECTED) startApFallback();   // WiFi nenajeta -> hned záchranný hotspot
 }
 
 void setup() {

@@ -74,7 +74,10 @@ děliči.
 - **Diagnostika běhu** — důvod posledního restartu, uptime, heap, fragmentace, TX výkon,
   takt CPU (kvůli ladění výpadků bez sériáku).
 - **Log událostí** — kruhový log (výpadky sítě, baterie, alarmy) s NTP časem, `/api/events` i ve webu.
-- **WiFi dohled** — aktivní reconnect, po 5 min bez WiFi tvrdý restart; **task watchdog** proti zaseknutí.
+- **WiFi dohled** — aktivní reconnect; když se WiFi nepřipojí (do 15 s po startu nebo po 5 min výpadku),
+  nahodí se **záchranný hotspot** (`MHpower-XXXX`, WPA2 heslo `mhpower-setup`, web na `http://192.168.4.1`),
+  přes který se opraví špatně zadaná WiFi; po obnově spojení se hotspot sám vypne. **Task watchdog** proti zaseknutí.
+- **mDNS** — dostupné na `http://<název>.local` bez znalosti IP.
 - **Úsporný režim** — snížený WiFi výkon, WiFi modem‑sleep, CPU 160 MHz, vypnutý Bluetooth,
   throttle snímání (nesnímá naplno pořád).
 
