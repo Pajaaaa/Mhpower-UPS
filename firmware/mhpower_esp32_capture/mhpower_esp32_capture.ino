@@ -998,7 +998,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
   </style>
 </head>
 <body>
-  <header><h1><span id="pageTitle">Monitoring zdroje MHpower 500W</span> <span class="small" id="deviceName"></span></h1><div class="small"><span id="age">...</span> | <a href="/settings">systém</a></div></header>
+  <header><h1><span id="pageTitle">Monitoring zdroje MHpower 500W</span> <span class="small" id="deviceName"></span></h1><div class="small"><span id="age">...</span> | <a href="/settings">systém</a> | ID <span id="hwId">-</span></div></header>
   <main>
     <span id="modelWatts" style="display:none">500</span>
     <div class="banner" id="batteryBanner">BĚH NA BATERII</div>
@@ -1019,7 +1019,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     <div class="status" id="pills"></div>
     <h2 class="label" style="margin:18px 0 8px;font-size:14px">Poslední události</h2>
     <div id="events" class="small"></div>
-    <div class="footer">Pavel Vlcek v1.6 hkfree.org</div>
+    <div class="footer">Pavel Vlcek v1.7 hkfree.org</div>
   </main>
   <script>
     function val(v){return v===null||v===undefined||v<0?'-':v}
@@ -1032,6 +1032,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       input.textContent=val(j.inputVoltage);output.textContent=val(j.outputVoltage);freq.textContent=val(j.frequencyHz);
       if(j.settings&&j.settings.sourceWatts){modelWatts.textContent=j.settings.sourceWatts;pageTitle.textContent='Monitoring zdroje MHpower '+j.settings.sourceWatts+'W'}
       deviceName.textContent=(j.settings&&j.settings.deviceName)?' - '+j.settings.deviceName:'';
+      if(j.hwId)hwId.textContent=j.hwId;
       source.textContent=j.onBattery?'BATERIE':(j.mainsPresent?'SÍŤ':'-');sourceTile.classList.toggle('danger',!!j.onBattery);sourceTile.classList.toggle('goodsource',!!j.mainsPresent&&!j.onBattery);batteryBanner.classList.toggle('on',!!j.onBattery);
       alarm.textContent=j.overheat?'TEPLOTA':(j.alarm?'ANO':'OK');online.textContent=j.online?'OK':'OFF';age.textContent='poslední data '+val(j.lastAgeMs)+' ms';
       bars('batteryBars',j.overheat?1:(j.criticalBattery?1:(j.charging?5:j.batteryBars)),5,j.overheat?'critical':(j.criticalBattery?'critical':(j.charging?'charge':'')));bars('loadBars',j.loadLevel,5,'load');
@@ -1069,6 +1070,7 @@ void sendStatusJson() {
     "\"freeHeap\":%u,\"rssi\":%d,\"ip\":\"%s\",\"mask\":\"%s\",\"gw\":\"%s\",\"dns\":\"%s\","
     "\"resetReason\":\"%s\",\"uptimeSec\":%lu,\"minFreeHeap\":%u,\"maxAllocHeap\":%u,"
     "\"txPowerDbm\":%.2f,\"cpuMhz\":%u,\"barsLearned\":%u,\"learnedUsableWh\":%d,"
+    "\"hwId\":\"%s\","
     "\"settings\":{\"deviceName\":\"%s\",\"sourceWatts\":%u,\"batteryAh\":%.1f,\"batteryInstallDate\":\"%s\","
     "\"healthWarnPercent\":%u,\"minRuntimeMinutes\":%u}}",
     online ? "true" : "false",
@@ -1122,6 +1124,7 @@ void sendStatusJson() {
     getCpuFrequencyMhz(),
     barsLearnedCount(),
     learnedUsableWh,
+    deviceHwId().c_str(),
     settings.deviceName,
     settings.sourceWatts,
     settings.batteryAh,
@@ -1292,6 +1295,9 @@ void handleSettings() {
   html += AP_FALLBACK_PASS;
   html += F("</b>), web pak běží na <b>http://192.168.4.1</b>. Po obnovení Wi-Fi se sám vypne.</p>");
   if (apFallbackActive) html += F("<p class='note' style='color:#ffd479'>Záchranný hotspot je právě aktivní.</p>");
+  html += F("<p class='note'>Trvalý HW identifikátor desky (MAC, nemění se reflashem ani smazáním nastavení): <b>");
+  html += escHtml(deviceHwId().c_str());
+  html += F("</b> &mdash; SNMP idx 45.</p>");
 
   html += F("<h2 class='sectionTitle'>Zdroj a baterie</h2><section class='grid'>");
   html += F("<div class='field'><label>Typ zdroje</label><select name='watts'>");
@@ -1332,7 +1338,7 @@ void handleSettings() {
   html += F("<form method='post' action='/restart'><button class='restart' type='submit'>Restartovat ESP32</button></form></div>");
   html += F("</section>");
 
-  html += F("<div class='footer'>Pavel Vlcek v1.6 hkfree.org</div></main>");
+  html += F("<div class='footer'>Pavel Vlcek v1.7 hkfree.org</div></main>");
   html += F("<script>(function(){var f=document.getElementById('fwform');if(!f)return;"
             "f.addEventListener('submit',function(e){e.preventDefault();"
             "var fi=document.getElementById('fwfile');if(!fi.files.length){return}"
@@ -1402,7 +1408,7 @@ void handleUpdateDone() {
 
 const uint32_t SNMP_BASE_OID[] = {1, 3, 6, 1, 4, 1, 53864, 1, 1};
 const uint8_t SNMP_BASE_LEN = sizeof(SNMP_BASE_OID) / sizeof(SNMP_BASE_OID[0]);
-const uint8_t SNMP_MAX_INDEX = 44;
+const uint8_t SNMP_MAX_INDEX = 45;
 
 bool readBerLen(const uint8_t* data, int total, int& pos, int& len) {
   if (pos >= total) return false;
@@ -1582,6 +1588,7 @@ bool getSnmpValue(uint8_t idx, SnmpValue& value) {
     case 42: value.type = 0x04; strncpy(value.text, resetReasonStr(bootResetReason), sizeof(value.text) - 1); break;  // důvod restartu
     case 43: value.integer = (int32_t)(WiFi.getTxPower() * 10 / 4); break;  // TX výkon [dBm×10]
     case 44: value.integer = (int32_t)getCpuFrequencyMhz(); break;          // takt CPU [MHz]
+    case 45: value.type = 0x04; strncpy(value.text, deviceHwId().c_str(), sizeof(value.text) - 1); break;  // HW ID = MAC (trvalý otisk desky)
     default: return false;
   }
   value.text[sizeof(value.text) - 1] = 0;
@@ -1744,6 +1751,16 @@ void onWifiEvent(WiFiEvent_t event) {
       break;
     default: break;
   }
+}
+
+// trvalý HW identifikátor desky = MAC z eFuse (přežije reflash i smazání NVS)
+String deviceHwId() {
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  char buf[18];
+  snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return String(buf);
 }
 
 // SSID záchranného hotspotu: MHpower-<2 bajty MAC> (unikátní, rozpoznatelné)

@@ -70,7 +70,7 @@ děliči.
 - **Webový dashboard** (auto‑refresh): vstup/výstup, síť/baterie, zátěž, výkon, alarmy,
   výdrž na baterii, kondice baterie.
 - **Odhad výdrže** s učením energie na jednotlivé dílky baterie (viz níže).
-- **SNMP v1** (UDP/161) — 44 OID pro integraci do monitoringu (Zabbix, LibreNMS, …).
+- **SNMP v1** (UDP/161) — 45 OID pro integraci do monitoringu (Zabbix, LibreNMS, …).
 - **OTA aktualizace** firmwaru přes web (s progress barem).
 - **Diagnostika běhu** — důvod posledního restartu, uptime, heap, fragmentace, TX výkon,
   takt CPU (kvůli ladění výpadků bez sériáku).
@@ -229,6 +229,8 @@ Base OID: **`1.3.6.1.4.1.53864.1.1`**, dotazuj se `…1.1.<index>.0` (GET i GETN
 
 Diagnostické OID (39–44): **39** uptime [s], **40** min volný heap [B], **41** největší volný blok [B],
 **42** (str) důvod restartu, **43** WiFi TX výkon [dBm×10], **44** takt CPU [MHz].
+
+Identifikace desky: **45** (str) HW ID = MAC desky (`AA:BB:CC:DD:EE:FF`) — trvalý otisk, nemění se reflashem ani smazáním nastavení; slouží k odlišení více kusů v jednom racku.
 
 Příklad: `snmpwalk -v1 -c public <IP> 1.3.6.1.4.1.53864.1.1`
 
