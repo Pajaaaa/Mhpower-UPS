@@ -29,6 +29,7 @@ const uint32_t WDT_TIMEOUT_S = 15;       // hardwarová pojistka proti zaseknut�
 const uint32_t WIFI_RETRY_MS = 15000;    // po této době bez WiFi zkusit reconnect
 const uint32_t WIFI_FALLBACK_MS = 300000;// po 5 min bez WiFi nahodit záchranný hotspot (AP)
 const uint32_t WIFI_HARD_REBOOT_MS = 3600000;  // 1 h bez WiFi i bez klientů na hotspotu -> tvrdý reboot (poslední pojistka)
+const uint32_t WEB_REINIT_MS = 600000;   // 10 min bez obslouženého HTTP požadavku -> recyklace listen socketu (pojistka proti zaseknutému webu)
 const char* const AP_FALLBACK_PASS = "mhpower-setup";  // WPA2 heslo hotspotu (min. 8 znaků)
 const uint8_t  EVENT_LOG_SIZE = 16;      // kruhový log událostí
 
@@ -170,6 +171,7 @@ uint32_t minFreeHeapBoot = 0;
 uint32_t lastWifiOkMs = 0;
 uint32_t lastWifiRetryMs = 0;
 bool apFallbackActive = false;   // běží záchranný AP hotspot (WiFi se nepřipojila)
+uint32_t lastWebReqMs = 0;       // čas posledního obslouženého HTTP požadavku (liveness web serveru)
 
 // --- kruhový log událostí (výpadky sítě, baterie, alarmy) ---
 struct LogEvent { uint32_t epoch; uint32_t uptime; char msg[28]; };
@@ -962,6 +964,7 @@ void printHex2(Stream& out, uint8_t v) {
 }
 
 bool requireAuth() {
+  lastWebReqMs = millis();   // dorazil HTTP požadavek -> web server prokazatelně žije
   if (server.authenticate(settings.webUser, settings.webPass)) return true;
   server.requestAuthentication();
   return false;
@@ -1016,7 +1019,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     <div class="status" id="pills"></div>
     <h2 class="label" style="margin:18px 0 8px;font-size:14px">Poslední události</h2>
     <div id="events" class="small"></div>
-    <div class="footer">Pavel Vlcek v1.4 hkfree.org</div>
+    <div class="footer">Pavel Vlcek v1.5 hkfree.org</div>
   </main>
   <script>
     function val(v){return v===null||v===undefined||v<0?'-':v}
@@ -1329,7 +1332,7 @@ void handleSettings() {
   html += F("<form method='post' action='/restart'><button class='restart' type='submit'>Restartovat ESP32</button></form></div>");
   html += F("</section>");
 
-  html += F("<div class='footer'>Pavel Vlcek v1.4 hkfree.org</div></main>");
+  html += F("<div class='footer'>Pavel Vlcek v1.5 hkfree.org</div></main>");
   html += F("<script>(function(){var f=document.getElementById('fwform');if(!f)return;"
             "f.addEventListener('submit',function(e){e.preventDefault();"
             "var fi=document.getElementById('fwfile');if(!fi.files.length){return}"
@@ -1795,6 +1798,20 @@ void maintainWifi() {
   }
 }
 
+// pojistka proti zaseknutému web serveru: když dlouho nikdo neprošel, recykluj listen socket.
+// Otevřený dashboard pollne á 3 s -> požadavky chodí -> server je prokazatelně živý a nerecykluje se.
+void maintainWeb() {
+  const uint32_t now = millis();
+  if (updateAuthorized) { lastWebReqMs = now; return; }   // probíhá OTA -> serverem nehýbat
+  if (lastWebReqMs == 0) { lastWebReqMs = now; return; }
+  if (now - lastWebReqMs > WEB_REINIT_MS) {
+    server.stop();
+    server.begin();
+    lastWebReqMs = now;
+    Serial.println("[web] recyklace listen socketu (pojistka proti zaseknuti)");
+  }
+}
+
 void sendEventsJson() {
   int n = snprintf(responseBody, sizeof(responseBody), "{\"ntp\":%s,\"events\":[", nowEpoch() ? "true" : "false");
   for (uint8_t i = 0; i < eventCount; i++) {
@@ -1899,6 +1916,7 @@ void loop() {
   esp_task_wdt_reset();
 #endif
   maintainWifi();
+  maintainWeb();
   keepSnmpUdpAlive();
   server.handleClient();
   handleSnmpBurst();
