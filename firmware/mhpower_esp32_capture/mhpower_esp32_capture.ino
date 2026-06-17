@@ -28,6 +28,7 @@
 const uint32_t WDT_TIMEOUT_S = 15;       // hardwarová pojistka proti zaseknutí
 const uint32_t WIFI_RETRY_MS = 15000;    // po této době bez WiFi zkusit reconnect
 const uint32_t WIFI_FALLBACK_MS = 300000;// po 5 min bez WiFi nahodit záchranný hotspot (AP)
+const uint32_t WIFI_HARD_REBOOT_MS = 3600000;  // 1 h bez WiFi i bez klientů na hotspotu -> tvrdý reboot (poslední pojistka)
 const char* const AP_FALLBACK_PASS = "mhpower-setup";  // WPA2 heslo hotspotu (min. 8 znaků)
 const uint8_t  EVENT_LOG_SIZE = 16;      // kruhový log událostí
 
@@ -600,7 +601,9 @@ void updateDecodedState(const uint8_t* mem, uint8_t brightness) {
                    (chargingAnimation || (mainsBatteryKnown && !state.batteryFull));
   state.criticalBattery = !state.overheat && state.onBattery && criticalBlink &&
                           (state.mem[9] == 0x10 || state.mem[9] == 0x30);
-  state.lowBattery = !state.overheat && state.onBattery && state.alarm && state.criticalBattery;
+  // nízká baterie = (skoro) vybitá, ale ještě ne kritická; kritická ji vždy zahrnuje
+  state.lowBattery = !state.overheat && state.onBattery &&
+                     (state.criticalBattery || (state.batteryBars != 255 && state.batteryBars <= 1));
 
   state.loadLevel = candidateLoad;
   state.overload = state.mem[7] == 0x7F;
@@ -1139,6 +1142,7 @@ String escHtml(const char* s) {
     else if (c == '<') out += F("&lt;");
     else if (c == '>') out += F("&gt;");
     else if (c == '"') out += F("&quot;");
+    else if (c == '\'') out += F("&#39;");
     else out += c;
   }
   return out;
@@ -1347,21 +1351,38 @@ void handleUpdatePage() {
   server.send(303);
 }
 
+bool updateAuthorized = false;   // OTA upload smí do flash zapisovat jen po ověření hesla
+
 void handleUpdateUpload() {
   HTTPUpload& upload = server.upload();
   if (upload.status == UPLOAD_FILE_START) {
-    Update.begin(UPDATE_SIZE_UNKNOWN);
+    // POZOR: tento callback běží během uploadu, JEŠTĚ než se zavolá handleUpdateDone,
+    // takže heslo musíme ověřit tady – jinak by šel firmware nahrát úplně bez hesla.
+    updateAuthorized = server.authenticate(settings.webUser, settings.webPass);
+    if (!updateAuthorized) return;
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) updateAuthorized = false;
   } else if (upload.status == UPLOAD_FILE_WRITE) {
-    Update.write(upload.buf, upload.currentSize);
+    if (!updateAuthorized) return;
+#if USE_TASK_WDT
+    esp_task_wdt_reset();   // velký/pomalý upload nesmí vyhladovět task watchdog
+#endif
+    if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+      Update.abort();
+      updateAuthorized = false;
+    }
   } else if (upload.status == UPLOAD_FILE_END) {
-    Update.end(true);
+    if (updateAuthorized) Update.end(true);
+  } else if (upload.status == UPLOAD_FILE_ABORTED) {
+    Update.abort();
+    updateAuthorized = false;
   }
 }
 
 void handleUpdateDone() {
   if (!requireAuth()) return;
-  const bool ok = !Update.hasError();
-  server.send(200, "text/plain", ok ? "OK, restartuji" : "Chyba uploadu");
+  const bool ok = updateAuthorized && !Update.hasError();
+  updateAuthorized = false;
+  server.send(200, "text/plain", ok ? "OK, restartuji" : "Chyba uploadu (neověřeno nebo vadný soubor)");
   delay(500);
   if (ok) ESP.restart();
 }
@@ -1702,6 +1723,7 @@ void onWifiEvent(WiFiEvent_t event) {
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
       lastWifiOkMs = millis();
       bindSnmpUdp();
+      startMdns();   // přehlásit mDNS po (re)connectu
       Serial.printf("[WiFi] IP %s\n", WiFi.localIP().toString().c_str());
       break;
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
@@ -1754,6 +1776,12 @@ void maintainWifi() {
   if (lastWifiOkMs == 0) lastWifiOkMs = now;
   // místo nekonečného restartu (ten by špatně zadanou WiFi nikdy neopravil) nahodíme hotspot
   if (!apFallbackActive && now - lastWifiOkMs > WIFI_FALLBACK_MS) startApFallback();
+  // poslední pojistka: hodina bez STA a nikdo není připojený na hotspot -> tvrdý reboot
+  if (now - lastWifiOkMs > WIFI_HARD_REBOOT_MS && WiFi.softAPgetStationNum() == 0) {
+    Serial.println("[WiFi] >1 h bez WiFi a bez klientu -> restart");
+    delay(50);
+    ESP.restart();
+  }
   if (now - lastWifiRetryMs > WIFI_RETRY_MS) {
     lastWifiRetryMs = now;
     Serial.println("[WiFi] reconnect...");
@@ -1792,6 +1820,12 @@ String deviceHostname() {
   return h;
 }
 
+// (re)spustí mDNS responder na aktuální hostname (idempotentní – nejdřív ukončí starý)
+void startMdns() {
+  MDNS.end();
+  if (MDNS.begin(deviceHostname().c_str())) MDNS.addService("http", "tcp", 80);   // -> http://<název>.local
+}
+
 void setupWifiAndWeb() {
   WiFi.persistent(false);
   WiFi.onEvent(onWifiEvent);
@@ -1818,7 +1852,7 @@ void setupWifiAndWeb() {
   server.on("/api/events", handleEvents);
   server.begin();
   bindSnmpUdp();
-  if (MDNS.begin(deviceHostname().c_str())) MDNS.addService("http", "tcp", 80);   // -> http://<název>.local
+  startMdns();
   lastWifiOkMs = millis();
   if (WiFi.status() != WL_CONNECTED) startApFallback();   // WiFi nenajeta -> hned záchranný hotspot
 }
