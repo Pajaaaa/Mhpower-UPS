@@ -1274,6 +1274,12 @@ void handleSettings() {
   html += F("'></div><div class='field'><label>NTP server</label><input name='ntp' maxlength='47' value='");
   html += escHtml(settings.ntpServer);
   html += F("'></div></section>");
+  html += F("<p class='note'>Když se Wi-Fi nepřipojí (do 15 s po startu nebo po 5 min výpadku), naskočí záchranný hotspot <b>");
+  html += escHtml(apSsid().c_str());
+  html += F("</b> (heslo <b>");
+  html += AP_FALLBACK_PASS;
+  html += F("</b>), web pak běží na <b>http://192.168.4.1</b>. Po obnovení Wi-Fi se sám vypne.</p>");
+  if (apFallbackActive) html += F("<p class='note' style='color:#ffd479'>Záchranný hotspot je právě aktivní.</p>");
 
   html += F("<h2 class='sectionTitle'>Zdroj a baterie</h2><section class='grid'>");
   html += F("<div class='field'><label>Typ zdroje</label><select name='watts'>");
