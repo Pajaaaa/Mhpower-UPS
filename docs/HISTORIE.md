@@ -198,6 +198,7 @@ Od tohoto bodu už vede historii **git**. Stručný přehled commitů:
 | `6eaaaeb` | 17. 6. | pojistka proti zaseknutému web serveru (`maintainWeb`) + **v1.5** |
 | `e2db484` | 17. 6. | OTA přežije odmítnutý/vadný upload (WDT fix) + **v1.6** |
 | `c53f99a` | 17. 6. | HW ID desky (MAC) na web + SNMP idx 45 — odlišení kusů v racku + **v1.7** |
+| `090063d` | 18. 6. | debounce alarmu/přetížení proti glitchům jednoho rámce (`confirmFlag`) — konec falešných „summary_error" v monitoringu + **v1.8** |
 
 Dvě provozní věci z tohoto období:
 
