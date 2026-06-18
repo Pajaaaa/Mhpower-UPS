@@ -141,6 +141,23 @@ struct RawDebugState {
 
 RawDebugState rawDebug;
 
+// --- odchyt neznámých číslic na displeji (hledáme chybějící „9") ---
+// Když je některá ze 6 číslic napětí (mem[0..5]) neznámý segmentový vzor a obě
+// zbývající číslice ve své trojici jsou platné 0–9, jde skoro jistě o reálnou
+// číslici, kterou tabulka digitFromPattern() ještě nezná. Zapíšeme její syrový
+// bajt + kontext, ať jde dohledat i bez sériáku (čte se přes /api/digitscan).
+struct UnknownDigitLog {
+  uint8_t pattern[8] = {0};   // až 8 různých neznámých bajtů
+  uint16_t count[8] = {0};    // kolikrát se každý objevil
+  uint8_t distinct = 0;       // kolik slotů je obsazeno
+  uint8_t lastPattern = 0;    // poslední neznámý bajt
+  uint8_t lastPos = 0;        // pozice 0..5 (0–2 vstup, 3–5 výstup)
+  uint8_t lastCtx[6] = {0};   // mem[0..5] v okamžiku záchytu (pro rekonstrukci čísla)
+  uint32_t lastEpoch = 0;
+  uint32_t lastUptime = 0;
+  uint32_t total = 0;         // celkový počet záchytů
+};
+UnknownDigitLog unkLog;
 
 uint8_t batteryHistory[8] = {0};
 uint8_t batteryHistoryPos = 0;
@@ -567,6 +584,39 @@ bool firstBatteryBarIsBlinking() {
   return seenOff && seenOne;
 }
 
+// zapiš jeden neznámý segmentový vzor do histogramu + ulož kontext
+void registerUnknownPattern(uint8_t val, uint8_t pos, const uint8_t* mem) {
+  unkLog.total++;
+  unkLog.lastPattern = val;
+  unkLog.lastPos = pos;
+  memcpy(unkLog.lastCtx, mem, 6);
+  unkLog.lastEpoch = nowEpoch();
+  unkLog.lastUptime = millis() / 1000UL;
+  for (uint8_t i = 0; i < unkLog.distinct; i++) {
+    if (unkLog.pattern[i] == val) { if (unkLog.count[i] < 0xFFFF) unkLog.count[i]++; return; }
+  }
+  if (unkLog.distinct < 8) {
+    unkLog.pattern[unkLog.distinct] = val;
+    unkLog.count[unkLog.distinct] = 1;
+    unkLog.distinct++;
+  }
+}
+
+// projeď obě trojice číslic napětí; neznámou číslici zapiš jen když obě sousední
+// v téže trojici jsou platné 0–9 (silný signál, že jde o reálný neznámý glyf, ne šum)
+void recordUnknownDigits(const uint8_t* mem) {
+  for (uint8_t g = 0; g < 2; g++) {
+    const uint8_t base = g * 3;
+    uint8_t good = 0, unk = 0, unkIdx = 0, unkVal = 0;
+    for (uint8_t k = 0; k < 3; k++) {
+      const int d = digitFromPattern(mem[base + k]);
+      if (d >= 0) good++;
+      else if (d == -1) { unk++; unkIdx = k; unkVal = mem[base + k]; }
+    }
+    if (unk == 1 && good == 2) registerUnknownPattern(unkVal, base + unkIdx, mem);
+  }
+}
+
 void updateDecodedState(const uint8_t* mem, uint8_t brightness) {
   const int candidateInput = decode3Digits(&mem[0]);
   const int candidateOutput = decode3Digits(&mem[3]);
@@ -577,7 +627,12 @@ void updateDecodedState(const uint8_t* mem, uint8_t brightness) {
       candidateDisplayBlank &&
       (mem[6] == 0x43 || mem[6] == 0x83 || mem[6] == 0xC3 || mem[8] == 0x67);
 
-  if (!voltageLooksValid(candidateInput, candidateOutput) || (brightness & 0xF0) != 0x80) {
+  const bool brightnessOk = (brightness & 0xF0) == 0x80;
+  // záchyt neznámých číslic ZÁMĚRNĚ před filtrem napětí: právě neznámá číslice (např. „9")
+  // shodí candidateInput na -1 a frame by se jinak zahodil dřív, než bychom bajt viděli
+  if (brightnessOk) recordUnknownDigits(mem);
+
+  if (!voltageLooksValid(candidateInput, candidateOutput) || !brightnessOk) {
     state.filteredFrames++;
     return;
   }
@@ -1052,7 +1107,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     <div class="status" id="pills"></div>
     <h2 class="label" style="margin:18px 0 8px;font-size:14px">Poslední události</h2>
     <div id="events" class="small"></div>
-    <div class="footer">Pavel Vlcek v1.8 hkfree.org</div>
+    <div class="footer">Pavel Vlcek v1.9 hkfree.org</div>
   </main>
   <script>
     function val(v){return v===null||v===undefined||v<0?'-':v}
@@ -1371,7 +1426,7 @@ void handleSettings() {
   html += F("<form method='post' action='/restart'><button class='restart' type='submit'>Restartovat ESP32</button></form></div>");
   html += F("</section>");
 
-  html += F("<div class='footer'>Pavel Vlcek v1.8 hkfree.org</div></main>");
+  html += F("<div class='footer'>Pavel Vlcek v1.9 hkfree.org</div></main>");
   html += F("<script>(function(){var f=document.getElementById('fwform');if(!f)return;"
             "f.addEventListener('submit',function(e){e.preventDefault();"
             "var fi=document.getElementById('fwfile');if(!fi.files.length){return}"
@@ -1885,6 +1940,55 @@ void handleEvents() {
   sendEventsJson();
 }
 
+// odhad číslice ze segmentového bajtu vč. dosud nemapované „9" (tečka/DP = bit7 se ignoruje)
+int8_t guessDigitFromSegments(uint8_t v) {
+  static const uint8_t tbl[10] = {0x77,0x41,0x6E,0x6D,0x59,0x3D,0x3F,0x61,0x7F,0x7D};
+  const uint8_t m = v & 0x7F;
+  for (uint8_t d = 0; d < 10; d++) if (tbl[d] == m) return d;
+  return -1;
+}
+
+void sendDigitScan() {
+  const char* posName = unkLog.lastPos < 3 ? "vstup" : "vystup";
+  const uint8_t col = unkLog.lastPos % 3;   // 0=stovky 1=desitky 2=jednotky
+  const char* colName = col == 0 ? "stovky" : (col == 1 ? "desitky" : "jednotky");
+  int n = snprintf(responseBody, sizeof(responseBody),
+                   "nezname cislice displeje (hledame 9) - fw v1.9\n"
+                   "celkem zachyceno: %lu\n", (unsigned long)unkLog.total);
+  if (unkLog.total) {
+    const int8_t g = guessDigitFromSegments(unkLog.lastPattern);
+    n += snprintf(responseBody + n, sizeof(responseBody) - n,
+                  "naposledy: 0x%02X na pozici %u (%s/%s) | kontext %02X %02X %02X  %02X %02X %02X"
+                  " | pred %lu s (uptime %lu s, ntp %s)\n",
+                  unkLog.lastPattern, unkLog.lastPos, posName, colName,
+                  unkLog.lastCtx[0], unkLog.lastCtx[1], unkLog.lastCtx[2],
+                  unkLog.lastCtx[3], unkLog.lastCtx[4], unkLog.lastCtx[5],
+                  (unsigned long)(unkLog.lastEpoch ? (nowEpoch() - unkLog.lastEpoch) : 0),
+                  (unsigned long)unkLog.lastUptime, unkLog.lastEpoch ? "ano" : "ne");
+    if (g >= 0) n += snprintf(responseBody + n, sizeof(responseBody) - n,
+                              "  -> posledni vzor 0x%02X odpovida cislici %d\n", unkLog.lastPattern, g);
+  }
+  n += snprintf(responseBody + n, sizeof(responseBody) - n, "histogram:\n");
+  if (!unkLog.distinct) n += snprintf(responseBody + n, sizeof(responseBody) - n, "  (zatim nic)\n");
+  for (uint8_t i = 0; i < unkLog.distinct; i++) {
+    const int8_t g = guessDigitFromSegments(unkLog.pattern[i]);
+    if (g >= 0)
+      n += snprintf(responseBody + n, sizeof(responseBody) - n,
+                    "  0x%02X x%u  -> nejspis %d\n", unkLog.pattern[i], unkLog.count[i], g);
+    else
+      n += snprintf(responseBody + n, sizeof(responseBody) - n,
+                    "  0x%02X x%u  -> ?\n", unkLog.pattern[i], unkLog.count[i]);
+  }
+  snprintf(responseBody + n, sizeof(responseBody) - n,
+           "pozn.: predikce z bit-layoutu 9 = 0x7D (a,b,c,d,f,g; s teckou 0xFD). Po potvrzeni pridat do digitFromPattern().\n");
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "text/plain; charset=utf-8", responseBody);
+}
+void handleDigitScan() {
+  if (!requireAuth()) return;
+  sendDigitScan();
+}
+
 // hostname pro mDNS i DHCP: z deviceName ponech jen [a-z0-9-], jinak "mhpower"
 String deviceHostname() {
   String h;
@@ -1927,6 +2031,7 @@ void setupWifiAndWeb() {
   server.on("/update", HTTP_GET, handleUpdatePage);
   server.on("/update", HTTP_POST, handleUpdateDone, handleUpdateUpload);
   server.on("/api/events", handleEvents);
+  server.on("/api/digitscan", handleDigitScan);
   server.begin();
   bindSnmpUdp();
   startMdns();
