@@ -199,6 +199,7 @@ Od tohoto bodu už vede historii **git**. Stručný přehled commitů:
 | `e2db484` | 17. 6. | OTA přežije odmítnutý/vadný upload (WDT fix) + **v1.6** |
 | `c53f99a` | 17. 6. | HW ID desky (MAC) na web + SNMP idx 45 — odlišení kusů v racku + **v1.7** |
 | `090063d` | 18. 6. | debounce alarmu/přetížení proti glitchům jednoho rámce (`confirmFlag`) — konec falešných „summary_error" v monitoringu + **v1.8** |
+| `8ec3672` | 18. 6. | odchyt neznámých číslic displeje přes `/api/digitscan` (zatím chybí segmentový vzor „9") — záchyt běží před filtrem napětí, zapíše jen 1 neznámou mezi 2 platnými + **v1.9** |
 
 Dvě provozní věci z tohoto období:
 
