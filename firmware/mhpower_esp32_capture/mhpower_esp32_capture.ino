@@ -151,6 +151,17 @@ bool stableOnBattery = false;
 bool pendingOnBattery = false;
 uint8_t pendingSourceCount = 0;
 
+// debounce stavových příznaků proti glitchům jednoho rámce: alarm bit (mem[6] & 0x04) a
+// přetížení (mem[7]==0x7F) se braly syrově z jednoho rámce -> jeden zkažený rámec dělal
+// falešný alarm/přetížení (a tím i "summary_error" v power monitoru). onBattery na stejném
+// bytu glitch ustojí díky SOURCE_CONFIRM_FRAMES, tyhle bity ne -> dostávají stejný debounce.
+bool stableAlarmBit = false;
+bool pendingAlarmBit = false;
+uint8_t pendingAlarmCount = 0;
+bool stableOverload = false;
+bool pendingOverload = false;
+uint8_t pendingOverloadCount = 0;
+
 uint8_t samples[CAPTURE_SAMPLES];
 bool batterySessionActive = false;
 uint32_t batterySessionStartMs = 0;
@@ -162,6 +173,23 @@ float batterySessionStartFraction = 1.0f;
 float avgDrainW = 0.0f;
 uint32_t lastCaptureAttemptMs = 0;
 uint32_t lastSnmpBindMs = 0;
+
+// Potvrzovací debounce binárního příznaku: 'stable' se přepne na 'raw' teprve když 'raw'
+// vydrží shodně po 'confirmFrames' po sobě jdoucích rámcích. Jeden zkažený rámec (běžné u
+// pasivního odposlechu sběrnice) tak stavový příznak nepřepne. Vrací aktuální stabilní hodnotu.
+bool confirmFlag(bool raw, bool &stable, bool &pending, uint8_t &count, uint8_t confirmFrames) {
+  if (raw == stable) {
+    pending = raw;
+    count = 0;
+  } else if (pending != raw) {
+    pending = raw;
+    count = 1;
+  } else if (count < 255 && ++count >= confirmFrames) {
+    stable = raw;
+    count = 0;
+  }
+  return stable;
+}
 
 // --- diagnostika běhu (kvůli ladění výpadků/restartů bez sériáku) ---
 esp_reset_reason_t bootResetReason = ESP_RST_UNKNOWN;
@@ -590,7 +618,10 @@ void updateDecodedState(const uint8_t* mem, uint8_t brightness) {
   const uint8_t mode = state.mem[6];
   state.onBattery = state.overheat ? false : stableOnBattery;
   state.mainsPresent = !state.onBattery;
-  state.alarm = state.overheat || ((mode & 0x04) != 0);
+  const bool rawAlarmBit = (mode & 0x04) != 0;
+  const bool stableAlarm = confirmFlag(rawAlarmBit, stableAlarmBit, pendingAlarmBit,
+                                       pendingAlarmCount, SOURCE_CONFIRM_FRAMES);
+  state.alarm = state.overheat || stableAlarm;
 
   state.batteryBars = candidateBars;
   rememberBatteryPattern(state.mem[9]);
@@ -613,7 +644,9 @@ void updateDecodedState(const uint8_t* mem, uint8_t brightness) {
                      (state.criticalBattery || (state.batteryBars != 255 && state.batteryBars <= 1));
 
   state.loadLevel = candidateLoad;
-  state.overload = state.mem[7] == 0x7F;
+  const bool rawOverload = state.mem[7] == 0x7F;
+  state.overload = confirmFlag(rawOverload, stableOverload, pendingOverload,
+                               pendingOverloadCount, SOURCE_CONFIRM_FRAMES);
   if (state.loadLevel == 255) {
     state.loadPercent = -1;
     state.loadWattsEstimate = -1;
@@ -1019,7 +1052,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     <div class="status" id="pills"></div>
     <h2 class="label" style="margin:18px 0 8px;font-size:14px">Poslední události</h2>
     <div id="events" class="small"></div>
-    <div class="footer">Pavel Vlcek v1.7 hkfree.org</div>
+    <div class="footer">Pavel Vlcek v1.8 hkfree.org</div>
   </main>
   <script>
     function val(v){return v===null||v===undefined||v<0?'-':v}
@@ -1338,7 +1371,7 @@ void handleSettings() {
   html += F("<form method='post' action='/restart'><button class='restart' type='submit'>Restartovat ESP32</button></form></div>");
   html += F("</section>");
 
-  html += F("<div class='footer'>Pavel Vlcek v1.7 hkfree.org</div></main>");
+  html += F("<div class='footer'>Pavel Vlcek v1.8 hkfree.org</div></main>");
   html += F("<script>(function(){var f=document.getElementById('fwform');if(!f)return;"
             "f.addEventListener('submit',function(e){e.preventDefault();"
             "var fi=document.getElementById('fwfile');if(!fi.files.length){return}"
