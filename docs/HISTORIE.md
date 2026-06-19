@@ -202,6 +202,7 @@ Od tohoto bodu už vede historii **git**. Stručný přehled commitů:
 | `8ec3672` | 18. 6. | odchyt neznámých číslic displeje přes `/api/digitscan` (zatím chybí segmentový vzor „9") — záchyt běží před filtrem napětí, zapíše jen 1 neznámou mezi 2 platnými + **v1.9** |
 | `966be3a` | 19. 6. | `digitFromPattern` zná **0x7D = „9"** — potvrzeno přes noc digit-scanem (`/api/digitscan`: 0x7D ×674, dominantní); napětí s devítkou (229 V…) už nepadá na −1 + **v1.10** |
 | `53dcfba` | 19. 6. | **přepětí/podpětí** (AVR V↑/V↓ odvozené z dekódovaného vstupu, prahy 253/207 V — pole `avrState`) + **icon-scan** (`/api/iconscan`, histogram `mem[6]`/`mem[8]` s kontextem napětí — hon na reálné bity ikon V↑/V↓/⚠️) + **24V/48V baterie** (`batterySystemVoltage`, škáluje odhad napětí i Wh kapacitu); SNMP idx 46–48, web dlaždice „Síť (AVR)" + **v1.11** |
+| `19425d4` | 19. 6. | doplnění v1.11: všech **14 modelů MPU** 300–5000W v „Typ zdroje" (z manuálu), **napětí baterie se odvodí z modelu** (`batteryVoltageForWatts`: ≤800W=12V, ≤2500W=24V, jinak 48V — dle tabulky výdrže), ruční výběr napětí baterie zrušen |
 
 Dvě provozní věci z tohoto období:
 
