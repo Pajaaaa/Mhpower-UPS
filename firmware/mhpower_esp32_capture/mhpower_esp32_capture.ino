@@ -391,6 +391,7 @@ int digitFromPattern(uint8_t p) {
     case 0x3F: return 6;
     case 0x61: return 7;
     case 0xFF: return 8;
+    case 0x7D: return 9;  // potvrzeno digit-scanem (0x7D x674 pres noc)
     case 0x00: return -2;
     default: return -1;
   }
@@ -1107,7 +1108,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     <div class="status" id="pills"></div>
     <h2 class="label" style="margin:18px 0 8px;font-size:14px">Poslední události</h2>
     <div id="events" class="small"></div>
-    <div class="footer">Pavel Vlcek v1.9 hkfree.org</div>
+    <div class="footer">Pavel Vlcek v1.10 hkfree.org</div>
   </main>
   <script>
     function val(v){return v===null||v===undefined||v<0?'-':v}
@@ -1426,7 +1427,7 @@ void handleSettings() {
   html += F("<form method='post' action='/restart'><button class='restart' type='submit'>Restartovat ESP32</button></form></div>");
   html += F("</section>");
 
-  html += F("<div class='footer'>Pavel Vlcek v1.9 hkfree.org</div></main>");
+  html += F("<div class='footer'>Pavel Vlcek v1.10 hkfree.org</div></main>");
   html += F("<script>(function(){var f=document.getElementById('fwform');if(!f)return;"
             "f.addEventListener('submit',function(e){e.preventDefault();"
             "var fi=document.getElementById('fwfile');if(!fi.files.length){return}"
@@ -1953,7 +1954,7 @@ void sendDigitScan() {
   const uint8_t col = unkLog.lastPos % 3;   // 0=stovky 1=desitky 2=jednotky
   const char* colName = col == 0 ? "stovky" : (col == 1 ? "desitky" : "jednotky");
   int n = snprintf(responseBody, sizeof(responseBody),
-                   "nezname cislice displeje (hledame 9) - fw v1.9\n"
+                   "nezname cislice displeje - fw v1.10\n"
                    "celkem zachyceno: %lu\n", (unsigned long)unkLog.total);
   if (unkLog.total) {
     const int8_t g = guessDigitFromSegments(unkLog.lastPattern);
