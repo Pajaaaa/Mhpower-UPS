@@ -75,6 +75,13 @@ struct AppSettings {
 
 AppSettings settings;
 
+// modely MPU a jejich napětí baterie (z manuálu): ≤800W=12V, ≤2500W=24V, jinak 48V
+// (potvrzeno tabulkou výdrže — 12V banka utáhne zátěž do ~700W, 24V do ~1800W, 48V výš)
+const uint16_t MPU_WATTS[] = {300, 500, 700, 800, 1050, 1200, 1400, 1600, 1800, 2100, 3000, 3500, 4200, 5000};
+const uint8_t MPU_WATTS_N = 14;
+bool isValidWatts(uint16_t w) { for (uint8_t i = 0; i < MPU_WATTS_N; i++) if (MPU_WATTS[i] == w) return true; return false; }
+uint8_t batteryVoltageForWatts(uint16_t w) { return w <= 800 ? 12 : (w <= 2500 ? 24 : 48); }
+
 struct SnmpValue {
   uint8_t type;
   int32_t integer;
@@ -332,14 +339,9 @@ void loadSettings() {
   settings.ntpServer[sizeof(settings.ntpServer) - 1] = 0;
   if (settings.ntpServer[0] == 0) strncpy(settings.ntpServer, "pool.ntp.org", sizeof(settings.ntpServer) - 1);
   settings.sourceWatts = prefs.getUShort("watts", settings.sourceWatts);
-  if (settings.sourceWatts != 300 && settings.sourceWatts != 500 &&
-      settings.sourceWatts != 700 && settings.sourceWatts != 800) {
-    settings.sourceWatts = 500;
-  }
+  if (!isValidWatts(settings.sourceWatts)) settings.sourceWatts = 500;
+  settings.batterySystemVoltage = batteryVoltageForWatts(settings.sourceWatts);  // napětí baterie automaticky z modelu
   settings.batteryAh = prefs.getFloat("batAh", settings.batteryAh);
-  settings.batterySystemVoltage = prefs.getUChar("batSysV", settings.batterySystemVoltage);
-  if (settings.batterySystemVoltage != 12 && settings.batterySystemVoltage != 24 && settings.batterySystemVoltage != 48)
-    settings.batterySystemVoltage = 12;
   settings.batteryHealthFactor = prefs.getFloat("batHealth", settings.batteryHealthFactor);
   if (settings.batteryHealthFactor < 0.20 || settings.batteryHealthFactor > 1.20) settings.batteryHealthFactor = 1.0;
   strncpy(settings.batteryInstallDate, install.c_str(), sizeof(settings.batteryInstallDate) - 1);
@@ -385,7 +387,6 @@ void saveSettings() {
   prefs.putString("ntp", settings.ntpServer);
   prefs.putUShort("watts", settings.sourceWatts);
   prefs.putFloat("batAh", settings.batteryAh);
-  prefs.putUChar("batSysV", settings.batterySystemVoltage);
   prefs.putFloat("batHealth", settings.batteryHealthFactor);
   prefs.putString("batDate", settings.batteryInstallDate);
   prefs.putUChar("health", settings.healthWarnPercent);
@@ -1372,15 +1373,11 @@ void handleSettings() {
     }
     if (server.hasArg("watts")) {
       const uint16_t w = (uint16_t)server.arg("watts").toInt();
-      if (w == 300 || w == 500 || w == 700 || w == 800) settings.sourceWatts = w;
+      if (isValidWatts(w)) { settings.sourceWatts = w; settings.batterySystemVoltage = batteryVoltageForWatts(w); }
     }
     if (server.hasArg("batAh")) {
       const float ah = server.arg("batAh").toFloat();
       if (ah >= 1.0 && ah <= 500.0) settings.batteryAh = ah;
-    }
-    if (server.hasArg("batV")) {
-      const uint8_t bv = (uint8_t)server.arg("batV").toInt();
-      if (bv == 12 || bv == 24 || bv == 48) settings.batterySystemVoltage = bv;
     }
     if (server.hasArg("batDate")) {
       String v = server.arg("batDate");
@@ -1449,31 +1446,21 @@ void handleSettings() {
   html += F("</b> &mdash; SNMP idx 45.</p>");
 
   html += F("<h2 class='sectionTitle'>Zdroj a baterie</h2><section class='grid'>");
-  html += F("<div class='field'><label>Typ zdroje</label><select name='watts'>");
-  const uint16_t watts[] = {300, 500, 700, 800};
-  for (uint8_t i = 0; i < 4; i++) {
+  html += F("<div class='field'><label>Typ zdroje (napětí baterie se nastaví automaticky)</label><select name='watts'>");
+  for (uint8_t i = 0; i < MPU_WATTS_N; i++) {
     html += F("<option value='");
-    html += watts[i];
+    html += MPU_WATTS[i];
     html += "'";
-    if (settings.sourceWatts == watts[i]) html += F(" selected");
+    if (settings.sourceWatts == MPU_WATTS[i]) html += F(" selected");
     html += F(">MHpower ");
-    html += watts[i];
-    html += F("W</option>");
+    html += MPU_WATTS[i];
+    html += F("W (");
+    html += batteryVoltageForWatts(MPU_WATTS[i]);
+    html += F("V baterie)</option>");
   }
   html += F("</select></div><div class='field'><label>Kapacita baterie Ah</label><input name='batAh' type='number' min='1' max='500' step='0.1' value='");
   html += String(settings.batteryAh, 1);
-  html += F("'></div><div class='field'><label>Napětí baterie (systém)</label><select name='batV'>");
-  const uint8_t batVopts[3] = {12, 24, 48};
-  for (uint8_t i = 0; i < 3; i++) {
-    html += F("<option value='");
-    html += batVopts[i];
-    html += "'";
-    if (settings.batterySystemVoltage == batVopts[i]) html += F(" selected");
-    html += F(">");
-    html += batVopts[i];
-    html += F(" V</option>");
-  }
-  html += F("</select></div><div class='field'><label>Datum instalace baterie</label><input name='batDate' type='date' value='");
+  html += F("'></div><div class='field'><label>Datum instalace baterie</label><input name='batDate' type='date' value='");
   html += escHtml(settings.batteryInstallDate);
   html += F("'></div></section>");
 
