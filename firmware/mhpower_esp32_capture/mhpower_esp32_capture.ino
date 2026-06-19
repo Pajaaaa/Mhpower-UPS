@@ -64,6 +64,7 @@ struct AppSettings {
   char webPass[33] = "changeme";         // !!! změň přihlašovací heslo do webu
   uint16_t sourceWatts = 500;
   float batteryAh = 40.0;
+  uint8_t batterySystemVoltage = 12;   // 12 / 24 / 48 V — vyšší řady MPU mají 24V (i 48V) banky
   float batteryHealthFactor = 1.0;
   char batteryInstallDate[11] = "2026-06-04";
   uint8_t healthWarnPercent = 60;
@@ -120,6 +121,9 @@ struct DisplayState {
   uint8_t batteryHealthPercent = 100;
   bool healthWarning = false;
   bool runtimeWarning = false;
+  bool overVoltage = false;    // vstup >110 % nominálu -> AVR snižuje (displej V↑)
+  bool underVoltage = false;   // vstup <90 % nominálu -> AVR zvyšuje (displej V↓)
+  const char* avrState = "unknown";  // "buck" / "boost" / "normal" / "n/a"
 };
 
 DisplayState state;
@@ -158,6 +162,18 @@ struct UnknownDigitLog {
   uint32_t total = 0;         // celkový počet záchytů
 };
 UnknownDigitLog unkLog;
+
+// --- icon-scan: histogram bajtů ikon mem[6] (mode) a mem[8] (ikony) s kontextem
+// vstupního napětí. Hledáme bity přepětí V↑ / podpětí V↓ / ⚠️, které svítí jen když
+// síť vyjede z pásma ~207–253 V. Čte se přes /api/iconscan.
+struct IconScanLog {
+  uint8_t mode[12] = {0};   uint16_t modeCount[12] = {0};   uint8_t modeDistinct = 0;
+  uint8_t icon[12] = {0};   uint16_t iconCount[12] = {0};   uint8_t iconDistinct = 0;
+  uint8_t hiMode = 0, hiIcon = 0; int hiV = -1; uint32_t hiEpoch = 0;   // záchyt při vstupu >253 V
+  uint8_t loMode = 0, loIcon = 0; int loV = -1; uint32_t loEpoch = 0;   // záchyt při vstupu <207 V
+  uint32_t total = 0;
+};
+IconScanLog iconLog;
 
 uint8_t batteryHistory[8] = {0};
 uint8_t batteryHistoryPos = 0;
@@ -321,6 +337,9 @@ void loadSettings() {
     settings.sourceWatts = 500;
   }
   settings.batteryAh = prefs.getFloat("batAh", settings.batteryAh);
+  settings.batterySystemVoltage = prefs.getUChar("batSysV", settings.batterySystemVoltage);
+  if (settings.batterySystemVoltage != 12 && settings.batterySystemVoltage != 24 && settings.batterySystemVoltage != 48)
+    settings.batterySystemVoltage = 12;
   settings.batteryHealthFactor = prefs.getFloat("batHealth", settings.batteryHealthFactor);
   if (settings.batteryHealthFactor < 0.20 || settings.batteryHealthFactor > 1.20) settings.batteryHealthFactor = 1.0;
   strncpy(settings.batteryInstallDate, install.c_str(), sizeof(settings.batteryInstallDate) - 1);
@@ -366,6 +385,7 @@ void saveSettings() {
   prefs.putString("ntp", settings.ntpServer);
   prefs.putUShort("watts", settings.sourceWatts);
   prefs.putFloat("batAh", settings.batteryAh);
+  prefs.putUChar("batSysV", settings.batterySystemVoltage);
   prefs.putFloat("batHealth", settings.batteryHealthFactor);
   prefs.putString("batDate", settings.batteryInstallDate);
   prefs.putUChar("health", settings.healthWarnPercent);
@@ -433,7 +453,7 @@ uint8_t loadLevelFrom07(uint8_t v) {
 }
 
 float nominalUsableBatteryWh() {
-  return settings.batteryAh * BATTERY_NOMINAL_V * BATTERY_USABLE_FRACTION * settings.batteryHealthFactor;
+  return settings.batteryAh * (BATTERY_NOMINAL_V * settings.batterySystemVoltage / 12.0f) * BATTERY_USABLE_FRACTION * settings.batteryHealthFactor;
 }
 
 // kolik reálně teče z baterie: výstupní zátěž / účinnost + vlastní spotřeba měniče
@@ -535,7 +555,7 @@ void saveBatteryHealthFactor() {
 
 bool learnBatteryHealthFromCurrentSession() {
   if (batterySessionStartFraction < 0.90f) return false;   // učit jen z výboje, co začal plný
-  const float nominalWh = settings.batteryAh * BATTERY_NOMINAL_V * BATTERY_USABLE_FRACTION;
+  const float nominalWh = settings.batteryAh * (BATTERY_NOMINAL_V * settings.batterySystemVoltage / 12.0f) * BATTERY_USABLE_FRACTION;
   if (nominalWh <= 1.0f || batterySessionUsedWh <= 1.0f) return false;
 
   float learned = batterySessionUsedWh / nominalWh;
@@ -616,6 +636,20 @@ void recordUnknownDigits(const uint8_t* mem) {
     }
     if (unk == 1 && good == 2) registerUnknownPattern(unkVal, base + unkIdx, mem);
   }
+}
+
+static void iconAddDistinct(uint8_t* vals, uint16_t* counts, uint8_t* n, uint8_t v, uint8_t cap) {
+  for (uint8_t i = 0; i < *n; i++) { if (vals[i] == v) { if (counts[i] < 0xFFFF) counts[i]++; return; } }
+  if (*n < cap) { vals[*n] = v; counts[*n] = 1; (*n)++; }
+}
+
+// zaznamenej ikonové bajty s kontextem vstupního napětí; inputV = -1 mimo síť (lo se nezapíše)
+void recordIconScan(const uint8_t* mem, int inputV) {
+  iconLog.total++;
+  iconAddDistinct(iconLog.mode, iconLog.modeCount, &iconLog.modeDistinct, mem[6], 12);
+  iconAddDistinct(iconLog.icon, iconLog.iconCount, &iconLog.iconDistinct, mem[8], 12);
+  if (inputV > 253) { iconLog.hiMode = mem[6]; iconLog.hiIcon = mem[8]; iconLog.hiV = inputV; iconLog.hiEpoch = nowEpoch(); }
+  else if (inputV >= 0 && inputV < 207) { iconLog.loMode = mem[6]; iconLog.loIcon = mem[8]; iconLog.loV = inputV; iconLog.loEpoch = nowEpoch(); }
 }
 
 void updateDecodedState(const uint8_t* mem, uint8_t brightness) {
@@ -711,6 +745,17 @@ void updateDecodedState(const uint8_t* mem, uint8_t brightness) {
     state.loadWattsEstimate = (state.loadLevel * (int)settings.sourceWatts) / 5;
   }
 
+  // přepětí/podpětí z dekódovaného vstupního napětí (prahy 110 %/90 % nominálu 230 V → 253/207 V)
+  if (state.mainsPresent && state.inputVoltage >= 0) {
+    state.overVoltage = state.inputVoltage > 253;
+    state.underVoltage = state.inputVoltage < 207;
+  } else {
+    state.overVoltage = false;
+    state.underVoltage = false;
+  }
+  state.avrState = state.overVoltage ? "buck" : (state.underVoltage ? "boost" : (state.mainsPresent ? "normal" : "n/a"));
+  recordIconScan(state.mem, state.mainsPresent ? state.inputVoltage : -1);
+
   state.sourceState = state.overheat ? "overheat" : (state.onBattery ? "battery" : "mains");
 
   if (state.overheat) state.batteryState = "overheat";
@@ -738,6 +783,10 @@ void updateDecodedState(const uint8_t* mem, uint8_t brightness) {
       }
     }
   }
+  // vyšší řady MPU mají 24V (příp. 48V) banky — odhad je kalibrovaný na 12V blok,
+  // celkové napětí banky proto škálujeme dle nastaveného systémového napětí (range = napětí na blok)
+  if (state.batteryVoltageEstimate >= 0 && settings.batterySystemVoltage != 12)
+    state.batteryVoltageEstimate *= (settings.batterySystemVoltage / 12.0f);
 
   if (state.overload) state.loadState = "overload";
   else {
@@ -1095,6 +1144,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       <div class="tile"><div class="label">Vstup</div><div class="value"><span id="input">-</span><span class="unit">V</span></div></div>
       <div class="tile"><div class="label">Výstup</div><div class="value"><span id="output">-</span><span class="unit">V</span></div></div>
       <div class="tile"><div class="label">Frekvence</div><div class="value"><span id="freq">50</span><span class="unit">Hz</span></div></div>
+      <div class="tile" id="avrTile"><div class="label">Síť (AVR)</div><div class="value" id="avr">-</div></div>
       <div class="tile" id="sourceTile"><div class="label">Zdroj</div><div class="value" id="source">-</div></div>
       <div class="tile"><div class="label">Baterie</div><div class="value" id="batteryValue">-</div><div class="bars" id="batteryBars"></div><div class="small" id="batteryText"></div></div>
       <div class="tile"><div class="label">Běh na baterii</div><div class="value" id="runtimeNow">-</div><div class="small" id="runtimeText"></div></div>
@@ -1108,7 +1158,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     <div class="status" id="pills"></div>
     <h2 class="label" style="margin:18px 0 8px;font-size:14px">Poslední události</h2>
     <div id="events" class="small"></div>
-    <div class="footer">Pavel Vlcek v1.10 hkfree.org</div>
+    <div class="footer">Pavel Vlcek v1.11 hkfree.org</div>
   </main>
   <script>
     function val(v){return v===null||v===undefined||v<0?'-':v}
@@ -1119,6 +1169,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     async function renderEvents(){try{const r=await fetch('/api/events',{cache:'no-store'});const j=await r.json();let h='';for(const e of j.events){const t=e.epoch>0?new Date(e.epoch*1000).toLocaleString('cs-CZ'):('běh '+fmtTime(e.uptime));h+=`<div>${t} — ${e.msg}</div>`}document.getElementById('events').innerHTML=h||'<div>žádné události</div>'}catch(e){}}
     async function tick(){let j;try{const r=await fetch('/api/status',{cache:'no-store'});j=await r.json()}catch(e){j={online:false,error:String(e)}}
       input.textContent=val(j.inputVoltage);output.textContent=val(j.outputVoltage);freq.textContent=val(j.frequencyHz);
+      avr.textContent=j.overVoltage?'V↑ přepětí':(j.underVoltage?'V↓ podpětí':(j.mainsPresent?'v normě':'-'));avrTile.classList.toggle('danger',!!(j.overVoltage||j.underVoltage));
       if(j.settings&&j.settings.sourceWatts){modelWatts.textContent=j.settings.sourceWatts;pageTitle.textContent='Monitoring zdroje MHpower '+j.settings.sourceWatts+'W'}
       deviceName.textContent=(j.settings&&j.settings.deviceName)?' - '+j.settings.deviceName:'';
       if(j.hwId)hwId.textContent=j.hwId;
@@ -1131,7 +1182,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       const batHealth=j.batteryHealthPercent!==undefined?j.batteryHealthPercent:'-';
       batteryText.textContent=(j.overheat?'teplotní alarm':(j.criticalBattery?'kritický stav před vypnutím':(j.charging?'nabíjení':((j.batteryState||'')+(j.batteryVoltageEstimate!==null&&j.batteryVoltageEstimate!==undefined?' / '+Number(j.batteryVoltageEstimate).toFixed(1)+' V':'')))))+' / '+batAh+' Ah / zdraví '+batHealth+' %';loadText.textContent=j.loadState||'';
       rssi.textContent=signed(j.rssi);ip.innerHTML='IP '+(j.ip||'-')+'<br>maska '+(j.mask||'-')+'<br>brána '+(j.gw||'-')+'<br>DNS '+(j.dns||'-');diag.textContent='rámců '+val(j.frames)+' / heap '+val(j.freeHeap)+' (min '+val(j.minFreeHeap)+', blok '+val(j.maxAllocHeap)+') / err '+val(j.errors)+' / filtr '+val(j.filtered)+' / cap '+val(j.captureOk)+' / tout '+val(j.captureTimeouts)+' | běh '+fmtTime(j.uptimeSec)+' / reset: '+(j.resetReason||'?')+' / TX '+(j.txPowerDbm!==undefined?Number(j.txPowerDbm).toFixed(1)+' dBm':'?')+' / CPU '+val(j.cpuMhz)+' MHz / dílky '+val(j.barsLearned)+'/5'+(j.learnedUsableWh?' ('+val(j.learnedUsableWh)+' Wh)':'');
-      let ps='';ps+=pill(j.mainsPresent?'Síť přítomna':'Bez sítě',j.mainsPresent?'good':'bad');if(j.onBattery)ps+=pill('BĚH NA BATERII','bad');if(j.overheat)ps+=pill('PŘEHŘÁTÍ','bad');if(j.criticalBattery)ps+=pill('BATERIE 0 %','bad');if(j.charging)ps+=pill('Nabíjení','good');if(j.batteryFull)ps+=pill('Baterie plná','good');if(j.lowBattery)ps+=pill('Nízká baterie','bad');if(j.overload)ps+=pill('Přetížení','bad');if(j.alarm&&!j.overheat)ps+=pill('Alarm','bad');if(j.healthWarning)ps+=pill('Kondice baterie nízká','warn');if(j.runtimeWarning)ps+=pill('Výdrž pod limitem','warn');pills.innerHTML=ps;renderEvents()}
+      let ps='';ps+=pill(j.mainsPresent?'Síť přítomna':'Bez sítě',j.mainsPresent?'good':'bad');if(j.onBattery)ps+=pill('BĚH NA BATERII','bad');if(j.overheat)ps+=pill('PŘEHŘÁTÍ','bad');if(j.criticalBattery)ps+=pill('BATERIE 0 %','bad');if(j.charging)ps+=pill('Nabíjení','good');if(j.batteryFull)ps+=pill('Baterie plná','good');if(j.lowBattery)ps+=pill('Nízká baterie','bad');if(j.overload)ps+=pill('Přetížení','bad');if(j.overVoltage)ps+=pill('PŘEPĚTÍ V↑','warn');if(j.underVoltage)ps+=pill('PODPĚTÍ V↓','warn');if(j.alarm&&!j.overheat)ps+=pill('Alarm','bad');if(j.healthWarning)ps+=pill('Kondice baterie nízká','warn');if(j.runtimeWarning)ps+=pill('Výdrž pod limitem','warn');pills.innerHTML=ps;renderEvents()}
     setInterval(tick,3000);tick();
   </script>
 </body>
@@ -1153,6 +1204,7 @@ void sendStatusJson() {
     "\"onBatteryRuntimeSec\":%lu,\"runtimeRemainingEstimateSec\":%ld,"
     "\"runtimeTotalEstimateSec\":%ld,\"lastBatteryRunSec\":%lu,\"loadLevel\":%d,\"loadPercent\":%d,"
     "\"loadWattsEstimate\":%d,\"loadState\":\"%s\",\"overload\":%s,\"displayBlank\":%s,"
+    "\"overVoltage\":%s,\"underVoltage\":%s,\"avrState\":\"%s\","
     "\"modeRaw\":\"0x%02X\",\"loadRaw\":\"0x%02X\",\"iconRaw\":\"0x%02X\",\"batteryRaw\":\"0x%02X\","
     "\"brightnessRaw\":\"0x%02X\",\"lastAgeMs\":%lu,\"bytes\":%lu,\"errors\":%lu,"
     "\"filtered\":%lu,\"captureOk\":%lu,\"captureTimeouts\":%lu,\"lastCaptureMs\":%lu,"
@@ -1160,7 +1212,7 @@ void sendStatusJson() {
     "\"resetReason\":\"%s\",\"uptimeSec\":%lu,\"minFreeHeap\":%u,\"maxAllocHeap\":%u,"
     "\"txPowerDbm\":%.2f,\"cpuMhz\":%u,\"barsLearned\":%u,\"learnedUsableWh\":%d,"
     "\"hwId\":\"%s\","
-    "\"settings\":{\"deviceName\":\"%s\",\"sourceWatts\":%u,\"batteryAh\":%.1f,\"batteryInstallDate\":\"%s\","
+    "\"settings\":{\"deviceName\":\"%s\",\"sourceWatts\":%u,\"batteryAh\":%.1f,\"batterySystemVoltage\":%u,\"batteryInstallDate\":\"%s\","
     "\"healthWarnPercent\":%u,\"minRuntimeMinutes\":%u}}",
     online ? "true" : "false",
     (unsigned long)state.frameCount,
@@ -1191,6 +1243,9 @@ void sendStatusJson() {
     state.loadState,
     state.overload ? "true" : "false",
     state.displayBlank ? "true" : "false",
+    state.overVoltage ? "true" : "false",
+    state.underVoltage ? "true" : "false",
+    state.avrState,
     state.mem[6], state.mem[7], state.mem[8], state.mem[9], state.brightnessCommand,
     age == 0xFFFFFFFFUL ? 0 : (unsigned long)age,
     (unsigned long)state.byteCount,
@@ -1217,6 +1272,7 @@ void sendStatusJson() {
     settings.deviceName,
     settings.sourceWatts,
     settings.batteryAh,
+    settings.batterySystemVoltage,
     settings.batteryInstallDate,
     settings.healthWarnPercent,
     settings.minRuntimeMinutes);
@@ -1322,6 +1378,10 @@ void handleSettings() {
       const float ah = server.arg("batAh").toFloat();
       if (ah >= 1.0 && ah <= 500.0) settings.batteryAh = ah;
     }
+    if (server.hasArg("batV")) {
+      const uint8_t bv = (uint8_t)server.arg("batV").toInt();
+      if (bv == 12 || bv == 24 || bv == 48) settings.batterySystemVoltage = bv;
+    }
     if (server.hasArg("batDate")) {
       String v = server.arg("batDate");
       v.trim();
@@ -1402,7 +1462,18 @@ void handleSettings() {
   }
   html += F("</select></div><div class='field'><label>Kapacita baterie Ah</label><input name='batAh' type='number' min='1' max='500' step='0.1' value='");
   html += String(settings.batteryAh, 1);
-  html += F("'></div><div class='field'><label>Datum instalace baterie</label><input name='batDate' type='date' value='");
+  html += F("'></div><div class='field'><label>Napětí baterie (systém)</label><select name='batV'>");
+  const uint8_t batVopts[3] = {12, 24, 48};
+  for (uint8_t i = 0; i < 3; i++) {
+    html += F("<option value='");
+    html += batVopts[i];
+    html += "'";
+    if (settings.batterySystemVoltage == batVopts[i]) html += F(" selected");
+    html += F(">");
+    html += batVopts[i];
+    html += F(" V</option>");
+  }
+  html += F("</select></div><div class='field'><label>Datum instalace baterie</label><input name='batDate' type='date' value='");
   html += escHtml(settings.batteryInstallDate);
   html += F("'></div></section>");
 
@@ -1427,7 +1498,7 @@ void handleSettings() {
   html += F("<form method='post' action='/restart'><button class='restart' type='submit'>Restartovat ESP32</button></form></div>");
   html += F("</section>");
 
-  html += F("<div class='footer'>Pavel Vlcek v1.10 hkfree.org</div></main>");
+  html += F("<div class='footer'>Pavel Vlcek v1.11 hkfree.org</div></main>");
   html += F("<script>(function(){var f=document.getElementById('fwform');if(!f)return;"
             "f.addEventListener('submit',function(e){e.preventDefault();"
             "var fi=document.getElementById('fwfile');if(!fi.files.length){return}"
@@ -1497,7 +1568,7 @@ void handleUpdateDone() {
 
 const uint32_t SNMP_BASE_OID[] = {1, 3, 6, 1, 4, 1, 53864, 1, 1};
 const uint8_t SNMP_BASE_LEN = sizeof(SNMP_BASE_OID) / sizeof(SNMP_BASE_OID[0]);
-const uint8_t SNMP_MAX_INDEX = 45;
+const uint8_t SNMP_MAX_INDEX = 48;
 
 bool readBerLen(const uint8_t* data, int total, int& pos, int& len) {
   if (pos >= total) return false;
@@ -1678,6 +1749,9 @@ bool getSnmpValue(uint8_t idx, SnmpValue& value) {
     case 43: value.integer = (int32_t)(WiFi.getTxPower() * 10 / 4); break;  // TX výkon [dBm×10]
     case 44: value.integer = (int32_t)getCpuFrequencyMhz(); break;          // takt CPU [MHz]
     case 45: value.type = 0x04; strncpy(value.text, deviceHwId().c_str(), sizeof(value.text) - 1); break;  // HW ID = MAC (trvalý otisk desky)
+    case 46: value.integer = state.overVoltage ? 1 : 0; break;   // přepětí (V↑, AVR snižuje)
+    case 47: value.integer = state.underVoltage ? 1 : 0; break;  // podpětí (V↓, AVR zvyšuje)
+    case 48: value.type = 0x04; strncpy(value.text, state.avrState, sizeof(value.text) - 1); break;  // AVR stav: buck/boost/normal/n-a
     default: return false;
   }
   value.text[sizeof(value.text) - 1] = 0;
@@ -1954,7 +2028,7 @@ void sendDigitScan() {
   const uint8_t col = unkLog.lastPos % 3;   // 0=stovky 1=desitky 2=jednotky
   const char* colName = col == 0 ? "stovky" : (col == 1 ? "desitky" : "jednotky");
   int n = snprintf(responseBody, sizeof(responseBody),
-                   "nezname cislice displeje - fw v1.10\n"
+                   "nezname cislice displeje - fw v1.11\n"
                    "celkem zachyceno: %lu\n", (unsigned long)unkLog.total);
   if (unkLog.total) {
     const int8_t g = guessDigitFromSegments(unkLog.lastPattern);
@@ -1988,6 +2062,39 @@ void sendDigitScan() {
 void handleDigitScan() {
   if (!requireAuth()) return;
   sendDigitScan();
+}
+
+void sendIconScan() {
+  int n = snprintf(responseBody, sizeof(responseBody),
+                   "icon-scan ikon displeje (hledame V-nahoru/V-dolu pri prepeti/podpeti) - fw v1.11\n"
+                   "celkem vzorku: %lu | normalni pasmo vstupu 207-253 V\n"
+                   "mem[6]=mode, mem[8]=ikony; porovnej hodnoty pri prepeti/podpeti s normalem.\n",
+                   (unsigned long)iconLog.total);
+  if (iconLog.hiV >= 0)
+    n += snprintf(responseBody + n, sizeof(responseBody) - n,
+                  "PREPETI (>253V): mode=0x%02X icon=0x%02X pri %d V, pred %lu s\n",
+                  iconLog.hiMode, iconLog.hiIcon, iconLog.hiV,
+                  (unsigned long)(iconLog.hiEpoch ? (nowEpoch() - iconLog.hiEpoch) : 0));
+  else n += snprintf(responseBody + n, sizeof(responseBody) - n, "PREPETI (>253V): zatim nezachyceno\n");
+  if (iconLog.loV >= 0)
+    n += snprintf(responseBody + n, sizeof(responseBody) - n,
+                  "PODPETI (<207V): mode=0x%02X icon=0x%02X pri %d V, pred %lu s\n",
+                  iconLog.loMode, iconLog.loIcon, iconLog.loV,
+                  (unsigned long)(iconLog.loEpoch ? (nowEpoch() - iconLog.loEpoch) : 0));
+  else n += snprintf(responseBody + n, sizeof(responseBody) - n, "PODPETI (<207V): zatim nezachyceno\n");
+  n += snprintf(responseBody + n, sizeof(responseBody) - n, "histogram mem[6] (mode):\n");
+  for (uint8_t i = 0; i < iconLog.modeDistinct; i++)
+    n += snprintf(responseBody + n, sizeof(responseBody) - n, "  0x%02X x%u\n", iconLog.mode[i], iconLog.modeCount[i]);
+  n += snprintf(responseBody + n, sizeof(responseBody) - n, "histogram mem[8] (ikony):\n");
+  for (uint8_t i = 0; i < iconLog.iconDistinct; i++)
+    n += snprintf(responseBody + n, sizeof(responseBody) - n, "  0x%02X x%u\n", iconLog.icon[i], iconLog.iconCount[i]);
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "text/plain; charset=utf-8", responseBody);
+}
+
+void handleIconScan() {
+  if (!requireAuth()) return;
+  sendIconScan();
 }
 
 // hostname pro mDNS i DHCP: z deviceName ponech jen [a-z0-9-], jinak "mhpower"
@@ -2033,6 +2140,7 @@ void setupWifiAndWeb() {
   server.on("/update", HTTP_POST, handleUpdateDone, handleUpdateUpload);
   server.on("/api/events", handleEvents);
   server.on("/api/digitscan", handleDigitScan);
+  server.on("/api/iconscan", handleIconScan);
   server.begin();
   bindSnmpUdp();
   startMdns();
