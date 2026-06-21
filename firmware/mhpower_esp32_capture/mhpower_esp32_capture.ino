@@ -465,6 +465,15 @@ float batteryDrainWatts() {
   return out / INVERTER_EFFICIENCY + (float)INVERTER_IDLE_W;
 }
 
+// Drain jen pro ODHAD výdrže: když displej hlásí nulovou/neznámou zátěž a výstup je zapnutý,
+// předpokládej minimální zátěž 10 % jmenovitého výkonu (≈ půl dílku z pásma 0–20 %) -> orientační (horní) odhad.
+// NEovlivňuje účtování energie ani učení Wh/dílek (ta jdou z reálného batteryDrainWatts()).
+float assumedDrainWattsForEstimate() {
+  if (state.outputVoltage <= 0) return 0.0f;
+  const float outW = state.loadWattsEstimate > 0 ? (float)state.loadWattsEstimate : settings.sourceWatts * 0.10f;
+  return outW / INVERTER_EFFICIENCY + (float)INVERTER_IDLE_W;
+}
+
 // využitelná energie po korekci na vybíjecí proud (Peukert)
 float usableBatteryWhAtDrain(float drainW) {
   const float wh = nominalUsableBatteryWh();
@@ -854,7 +863,7 @@ void updateDecodedState(const uint8_t* mem, uint8_t brightness) {
     }
 
     state.onBatteryRuntimeSec = (now - batterySessionStartMs) / 1000UL;
-    const float predictW = avgDrainW > 0.0f ? avgDrainW : drainW;   // klouzavý průměr = stabilní odhad
+    const float predictW = avgDrainW > 0.0f ? avgDrainW : (drainW > 0.0f ? drainW : assumedDrainWattsForEstimate());   // klouzavý průměr; při nulové zátěži orientační minimum
     float barRemWh = 0.0f, barTotWh = 0.0f;
     if (predictW > 0.0f && estimateRuntimeFromBars(barRemWh, barTotWh)) {
       // lepší model: ukotveno na naučenou energii dílků (Peukert/účinnost už v tom je)
@@ -892,7 +901,7 @@ void updateDecodedState(const uint8_t* mem, uint8_t brightness) {
     state.runtimeTotalEstimateSec = -1;
     // Proaktivní odhad: kdyby teď vypadla síť, jak dlouho by baterie při aktuální zátěži vydržela.
     // Zátěž bereme z odhadu výstupního výkonu (dílky), energii z naučené tabulky Wh/dílek nebo Peukert prioru.
-    const float projW = state.loadWattsEstimate > 0 ? (float)state.loadWattsEstimate : 0.0f;
+    const float projW = assumedDrainWattsForEstimate();   // při 0 zátěži počítá s min. zátěží (10 % jmen. výkonu)
     const bool batFull = state.batteryFull || state.batteryBars >= 5;
     float pRemWh = 0.0f, pTotWh = 0.0f;
     if (projW <= 0.0f) {
@@ -1177,7 +1186,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     <div class="status" id="pills"></div>
     <h2 class="label" style="margin:18px 0 8px;font-size:14px">Poslední události</h2>
     <div id="events" class="small"></div>
-    <div class="footer">Pavel Vlcek v1.12 hkfree.org</div>
+    <div class="footer">Pavel Vlcek v1.13 hkfree.org</div>
   </main>
   <script>
     function val(v){return v===null||v===undefined||v<0?'-':v}
@@ -1196,7 +1205,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       alarm.textContent=j.overheat?'TEPLOTA':(j.alarm?'ANO':'OK');online.textContent=j.online?'OK':'OFF';age.textContent='poslední data '+val(j.lastAgeMs)+' ms';
       bars('batteryBars',j.overheat?1:(j.criticalBattery?1:(j.charging?5:j.batteryBars)),5,j.overheat?'critical':(j.criticalBattery?'critical':(j.charging?'charge':'')));bars('loadBars',j.loadLevel,5,'load');
       batteryValue.textContent=j.overheat?'přehřátí':(j.criticalBattery?'0 %':(j.charging?'nabíjení':(Number.isFinite(j.batteryBars)&&j.batteryBars>=0?(j.batteryBars*20)+' %':'-')));loadPercent.textContent=val(j.loadPercent);loadWatts.textContent=val(j.loadWattsEstimate);
-      if(j.onBattery){runtimeNow.textContent=fmtTime(j.onBatteryRuntimeSec);runtimeText.textContent='zbývá '+fmtTime(j.runtimeRemainingEstimateSec)+' / celkem '+fmtTime(j.runtimeTotalEstimateSec)+' / posledně '+fmtTime(j.lastBatteryRunSec);}else{runtimeNow.textContent=(j.runtimeProjectedSec>0?'~'+fmtTime(j.runtimeProjectedSec):'-');runtimeText.textContent=(j.runtimeProjectedSec>0?'odhad výdrže při výpadku (zátěž '+val(j.loadWattsEstimate)+' W)':'odhad výdrže zatím nelze určit')+' / posledně '+fmtTime(j.lastBatteryRunSec);}
+      if(j.onBattery){runtimeNow.textContent=fmtTime(j.onBatteryRuntimeSec);runtimeText.textContent='zbývá '+fmtTime(j.runtimeRemainingEstimateSec)+' / celkem '+fmtTime(j.runtimeTotalEstimateSec)+' / posledně '+fmtTime(j.lastBatteryRunSec);}else{runtimeNow.textContent=(j.runtimeProjectedSec>0?'~'+fmtTime(j.runtimeProjectedSec):'-');runtimeText.textContent=(j.runtimeProjectedSec>0?('odhad výdrže při výpadku ('+(j.loadWattsEstimate>0?'zátěž '+val(j.loadWattsEstimate)+' W':'orientačně, min. zátěž')+')'):'odhad výdrže zatím nelze určit')+' / posledně '+fmtTime(j.lastBatteryRunSec);}
       const batAh=(j.settings&&j.settings.batteryAh!==undefined)?Number(j.settings.batteryAh).toFixed(1):'-';
       const batHealth=j.batteryHealthPercent!==undefined?j.batteryHealthPercent:'-';
       batteryText.textContent=(j.overheat?'teplotní alarm':(j.criticalBattery?'kritický stav před vypnutím':(j.charging?'nabíjení':((j.batteryState||'')+(j.batteryVoltageEstimate!==null&&j.batteryVoltageEstimate!==undefined?' / '+Number(j.batteryVoltageEstimate).toFixed(1)+' V':'')))))+' / '+batAh+' Ah / zdraví '+batHealth+' %';loadText.textContent=j.loadState||'';
@@ -1504,7 +1513,7 @@ void handleSettings() {
   html += F("<form method='post' action='/restart'><button class='restart' type='submit'>Restartovat ESP32</button></form></div>");
   html += F("</section>");
 
-  html += F("<div class='footer'>Pavel Vlcek v1.12 hkfree.org</div></main>");
+  html += F("<div class='footer'>Pavel Vlcek v1.13 hkfree.org</div></main>");
   html += F("<script>(function(){var f=document.getElementById('fwform');if(!f)return;"
             "f.addEventListener('submit',function(e){e.preventDefault();"
             "var fi=document.getElementById('fwfile');if(!fi.files.length){return}"
@@ -2035,7 +2044,7 @@ void sendDigitScan() {
   const uint8_t col = unkLog.lastPos % 3;   // 0=stovky 1=desitky 2=jednotky
   const char* colName = col == 0 ? "stovky" : (col == 1 ? "desitky" : "jednotky");
   int n = snprintf(responseBody, sizeof(responseBody),
-                   "nezname cislice displeje - fw v1.12\n"
+                   "nezname cislice displeje - fw v1.13\n"
                    "celkem zachyceno: %lu\n", (unsigned long)unkLog.total);
   if (unkLog.total) {
     const int8_t g = guessDigitFromSegments(unkLog.lastPattern);
@@ -2073,7 +2082,7 @@ void handleDigitScan() {
 
 void sendIconScan() {
   int n = snprintf(responseBody, sizeof(responseBody),
-                   "icon-scan ikon displeje (hledame V-nahoru/V-dolu pri prepeti/podpeti) - fw v1.12\n"
+                   "icon-scan ikon displeje (hledame V-nahoru/V-dolu pri prepeti/podpeti) - fw v1.13\n"
                    "celkem vzorku: %lu | normalni pasmo vstupu 207-253 V\n"
                    "mem[6]=mode, mem[8]=ikony; porovnej hodnoty pri prepeti/podpeti s normalem.\n",
                    (unsigned long)iconLog.total);
