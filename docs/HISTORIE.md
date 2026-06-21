@@ -204,6 +204,7 @@ Od tohoto bodu už vede historii **git**. Stručný přehled commitů:
 | `53dcfba` | 19. 6. | **přepětí/podpětí** (AVR V↑/V↓ odvozené z dekódovaného vstupu, prahy 253/207 V — pole `avrState`) + **icon-scan** (`/api/iconscan`, histogram `mem[6]`/`mem[8]` s kontextem napětí — hon na reálné bity ikon V↑/V↓/⚠️) + **24V/48V baterie** (`batterySystemVoltage`, škáluje odhad napětí i Wh kapacitu); SNMP idx 46–48, web dlaždice „Síť (AVR)" + **v1.11** |
 | `19425d4` | 19. 6. | doplnění v1.11: všech **14 modelů MPU** 300–5000W v „Typ zdroje" (z manuálu), **napětí baterie se odvodí z modelu** (`batteryVoltageForWatts`: ≤800W=12V, ≤2500W=24V, jinak 48V — dle tabulky výdrže), ruční výběr napětí baterie zrušen |
 | `bbcbe78` | 21. 6. | **proaktivní odhad výdrže baterie i na síti** (`runtimeProjectedSec`): na síti „kdyby teď vypadl proud, při aktuální zátěži vydrží ~X" (z naučené tabulky Wh/dílek nebo Peukert prioru `usableBatteryWhAtDrain`, plná baterie → celková energie); JSON `/api/status`, web dlaždice „Běh na baterii", SNMP idx 49 + **v1.12** |
+| `60cbc0e` | 21. 6. | odhad výdrže **i při nulové zátěži** (`assumedDrainWattsForEstimate`): když displej hlásí 0 dílků a výstup jede, počítá s min. zátěží 10 % jmen. výkonu (orientační horní odhad místo „-"); reálné účtování energie/učení Wh/dílek nedotčeno; web rozliší „zátěž X W" vs „orientačně, min. zátěž" + **v1.13** |
 
 Dvě provozní věci z tohoto období:
 
