@@ -2,7 +2,7 @@
 
 Jak projekt vznikal — od prvního záznamu logickým analyzátorem až po finální ESP32
 firmware se Schmittovým invertorem. Sepsáno zpětně z vývojových konverzací (3.–6. 6. 2026)
-a doplněno o milníky z gitu (16.–17. 6. 2026). Reálná hesla/SSID tu nejsou — v repu jsou
+a doplněno o milníky z gitu (16.–23. 6. 2026). Reálná hesla/SSID tu nejsou — v repu jsou
 jen placeholdery (viz [README → První konfigurace](../README.md#první-konfigurace)).
 
 ## Přehled cesty (TL;DR)
@@ -122,7 +122,7 @@ Vyčítání bylo nečekaně těžké — postupně se zkoušelo a zamítlo:
 
 **Průlom:** místo honění hran v reálném čase ESP32 **navzorkuje celý burst do bufferu a
 dekóduje ho offline** (jako analyzátor uvnitř čipu), s brute‑force výběrem správné varianty.
-Tato „known good" verze se uložila jako referenční základ.
+Tato „known good“ verze se uložila jako referenční základ.
 
 ---
 
@@ -139,7 +139,7 @@ Nad ověřené čtení se vrátil **web dashboard** (heslo do webu, OTA přes `/
   `/api/raw`, kdy uživatel měnil displej a firmware četl syrové bajty.
 - UI/identita: pojmenování zdroje (na dashboardu i v SNMP), **dynamický titulek** podle typu
   zdroje (300/500/700/800 W), editovatelný web login, stránka nastavení přejmenovaná na
-  **„systém"**, footer `Pavel Vlcek v1.0 hkfree.org`.
+  **„systém“**, footer `Pavel Vlcek v1.0 hkfree.org`.
 
 ---
 
@@ -154,7 +154,7 @@ Monitoring obstarává samostatný **power monitor** (projekt *edgepower*). Při
 - ESP odpovídá na **`…<idx>`** i na standardní scalar **`…<idx>.0`** (power monitor čeká `.0`)
   a vrací **stejný OID**, na který se ptal,
 - v jedné smyčce se **odbaví víc čekajících UDP paketů** (proti timeoutům při dotazu na víc OID),
-- **rebinding UDP/161** každých 30 s (řešilo „web žije, SNMP mlčí").
+- **rebinding UDP/161** každých 30 s (řešilo „web žije, SNMP mlčí“).
 
 > Otevřené: hromadný GET na více OID v jednom paketu vrací jen jeden varbind — power monitor
 > proto čte MHpower OID **po jednom**.
@@ -193,20 +193,20 @@ Od tohoto bodu už vede historii **git**. Stručný přehled commitů:
 | `8075099` | 17. 6. | mDNS zpět + záchranný AP hotspot při nepřipojené WiFi |
 | `046c7e5` | 17. 6. | info o záchranném hotspotu na stránce systém |
 | `634c6c7` | 17. 6. | **bezpečnost OTA** + opravy (auth, XSS, WDT, mDNS, baterie, pojistka) |
-| `6b889b8` | 17. 6. | oprava falešného „nabíjení" z glitche dekódu ikony baterie |
+| `6b889b8` | 17. 6. | oprava falešného „nabíjení“ z glitche dekódu ikony baterie |
 | `c1c4a54` | 17. 6. | **v1.4** (footer) |
 | `6eaaaeb` | 17. 6. | pojistka proti zaseknutému web serveru (`maintainWeb`) + **v1.5** |
 | `e2db484` | 17. 6. | OTA přežije odmítnutý/vadný upload (WDT fix) + **v1.6** |
 | `c53f99a` | 17. 6. | HW ID desky (MAC) na web + SNMP idx 45 — odlišení kusů v racku + **v1.7** |
-| `090063d` | 18. 6. | debounce alarmu/přetížení proti glitchům jednoho rámce (`confirmFlag`) — konec falešných „summary_error" v monitoringu + **v1.8** |
-| `8ec3672` | 18. 6. | odchyt neznámých číslic displeje přes `/api/digitscan` (zatím chybí segmentový vzor „9") — záchyt běží před filtrem napětí, zapíše jen 1 neznámou mezi 2 platnými + **v1.9** |
-| `966be3a` | 19. 6. | `digitFromPattern` zná **0x7D = „9"** — potvrzeno přes noc digit-scanem (`/api/digitscan`: 0x7D ×674, dominantní); napětí s devítkou (229 V…) už nepadá na −1 + **v1.10** |
-| `53dcfba` | 19. 6. | **přepětí/podpětí** (AVR V↑/V↓ odvozené z dekódovaného vstupu, prahy 253/207 V — pole `avrState`) + **icon-scan** (`/api/iconscan`, histogram `mem[6]`/`mem[8]` s kontextem napětí — hon na reálné bity ikon V↑/V↓/⚠️) + **24V/48V baterie** (`batterySystemVoltage`, škáluje odhad napětí i Wh kapacitu); SNMP idx 46–48, web dlaždice „Síť (AVR)" + **v1.11** |
-| `19425d4` | 19. 6. | doplnění v1.11: všech **14 modelů MPU** 300–5000W v „Typ zdroje" (z manuálu), **napětí baterie se odvodí z modelu** (`batteryVoltageForWatts`: ≤800W=12V, ≤2500W=24V, jinak 48V — dle tabulky výdrže), ruční výběr napětí baterie zrušen |
-| `bbcbe78` | 21. 6. | **proaktivní odhad výdrže baterie i na síti** (`runtimeProjectedSec`): na síti „kdyby teď vypadl proud, při aktuální zátěži vydrží ~X" (z naučené tabulky Wh/dílek nebo Peukert prioru `usableBatteryWhAtDrain`, plná baterie → celková energie); JSON `/api/status`, web dlaždice „Běh na baterii", SNMP idx 49 + **v1.12** |
-| `60cbc0e` | 21. 6. | odhad výdrže **i při nulové zátěži** (`assumedDrainWattsForEstimate`): když displej hlásí 0 dílků a výstup jede, počítá s min. zátěží 10 % jmen. výkonu (orientační horní odhad místo „-"); reálné účtování energie/učení Wh/dílek nedotčeno; web rozliší „zátěž X W" vs „orientačně, min. zátěž" + **v1.13** |
-| `bca6be7` | 23. 6. | **guest read-only přihlášení** (napevno `guest`/`guest`): host vidí dashboard, `/api/status` i `/api/events`, ale nic nezmění — nastavení, restart, OTA a dev-scany zůstávají adminovi. Úrovně přes `webAuthLevel()` (`requireRead` vs `requireAuth`), `/api/status` nese `isAdmin`, dashboard hostovi skryje odkaz „systém" a ukáže odznak „jen čtení". Nastavení: **Wi-Fi vyčleněna do samostatné sekce** s upozorněním, že se změna projeví až po restartu. Nese i v1.14 (sloučení dlaždic Zátěž %/Výkon W) + **v1.15** |
-| _(working)_ | 23. 6. | **odkaz „odhlásit" / přepnutí uživatele** (`/logout` vrací 401; odkaz v hlavičce monitoru i v systému pošle XHR s neplatnými údaji → prohlížeč zahodí Basic-auth přihlášení a znovu vyzve) — lze přepnout mezi `admin` a `guest`; sekce **Rozhraní (API)** v systému (odkazy na `/api/status`, `/api/events`, `/api/digitscan`, `/api/iconscan` + SNMP) + **v1.16** |
+| `090063d` | 18. 6. | debounce alarmu/přetížení proti glitchům jednoho rámce (`confirmFlag`) — konec falešných „summary_error“ v monitoringu + **v1.8** |
+| `8ec3672` | 18. 6. | odchyt neznámých číslic displeje přes `/api/digitscan` (zatím chybí segmentový vzor „9“) — záchyt běží před filtrem napětí, zapíše jen 1 neznámou mezi 2 platnými + **v1.9** |
+| `966be3a` | 19. 6. | `digitFromPattern` zná **0x7D = „9“** — potvrzeno přes noc digit-scanem (`/api/digitscan`: 0x7D ×674, dominantní); napětí s devítkou (229 V…) už nepadá na −1 + **v1.10** |
+| `53dcfba` | 19. 6. | **přepětí/podpětí** (AVR V↑/V↓ odvozené z dekódovaného vstupu, prahy 253/207 V — pole `avrState`) + **icon-scan** (`/api/iconscan`, histogram `mem[6]`/`mem[8]` s kontextem napětí — hon na reálné bity ikon V↑/V↓/⚠️) + **24V/48V baterie** (`batterySystemVoltage`, škáluje odhad napětí i Wh kapacitu); SNMP idx 46–48, web dlaždice „Síť (AVR)“ + **v1.11** |
+| `19425d4` | 19. 6. | doplnění v1.11: všech **14 modelů MPU** 300–5000W v „Typ zdroje“ (z manuálu), **napětí baterie se odvodí z modelu** (`batteryVoltageForWatts`: ≤800W=12V, ≤2500W=24V, jinak 48V — dle tabulky výdrže), ruční výběr napětí baterie zrušen |
+| `bbcbe78` | 21. 6. | **proaktivní odhad výdrže baterie i na síti** (`runtimeProjectedSec`): na síti „kdyby teď vypadl proud, při aktuální zátěži vydrží ~X“ (z naučené tabulky Wh/dílek nebo Peukert prioru `usableBatteryWhAtDrain`, plná baterie → celková energie); JSON `/api/status`, web dlaždice „Běh na baterii“, SNMP idx 49 + **v1.12** |
+| `60cbc0e` | 21. 6. | odhad výdrže **i při nulové zátěži** (`assumedDrainWattsForEstimate`): když displej hlásí 0 dílků a výstup jede, počítá s min. zátěží 10 % jmen. výkonu (orientační horní odhad místo „-“); reálné účtování energie/učení Wh/dílek nedotčeno; web rozliší „zátěž X W“ vs „orientačně, min. zátěž“ + **v1.13** |
+| `bca6be7` | 23. 6. | **guest read-only přihlášení** (napevno `guest`/`guest`): host vidí dashboard, `/api/status` i `/api/events`, ale nic nezmění — nastavení, restart, OTA a dev-scany zůstávají adminovi. Úrovně přes `webAuthLevel()` (`requireRead` vs `requireAuth`), `/api/status` nese `isAdmin`, dashboard hostovi skryje odkaz „systém“ a ukáže odznak „jen čtení“. Nastavení: **Wi-Fi vyčleněna do samostatné sekce** s upozorněním, že se změna projeví až po restartu. Nese i v1.14 (sloučení dlaždic Zátěž %/Výkon W) + **v1.15** |
+| _(working)_ | 23. 6. | **odkaz „odhlásit“ / přepnutí uživatele** (`/logout` vrací 401; odkaz v hlavičce monitoru i v systému pošle XHR s neplatnými údaji → prohlížeč zahodí Basic-auth přihlášení a znovu vyzve) — lze přepnout mezi `admin` a `guest`; sekce **Rozhraní (API)** v systému (odkazy na `/api/status`, `/api/events`, `/api/digitscan`, `/api/iconscan` + SNMP) + **v1.16** |
 
 Dvě provozní věci z tohoto období:
 
@@ -222,7 +222,7 @@ Dvě provozní věci z tohoto období:
 ## Co se ukázalo
 
 - **ESP8266 je na rychlý TM1640 clock slabé.** ESP32 je správná platforma — ale ne přes
-  „chytré" přerušení/RMT, nýbrž přes **blokový capture celého burstu + offline dekód**, jak to
+  „chytré“ přerušení/RMT, nýbrž přes **blokový capture celého burstu + offline dekód**, jak to
   dělal logický analyzátor a SPI slave na ATmeze. Jednoduchý a robustní princip vyhrál.
 - **Dělič nestačí na rušení.** Při nabíjení dělá toroid/měnič bordel; finální fix je
   **Schmittův invertor**, ne software.

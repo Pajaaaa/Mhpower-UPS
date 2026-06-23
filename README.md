@@ -2,7 +2,7 @@
 
 Monitoring zálohovaných zdrojů **MHpower (MPU‑500 a příbuzné)** pomocí ESP32. Firmware
 **pasivně odposlouchává sběrnici displeje (TM1640)**, dekóduje z ní vstupní/výstupní napětí,
-stav sítě/baterie, zátěž a alarmy, a publikuje je přes **webové rozhraní** a **SNMP**.
+stav sítě/baterie, zátěž a alarmy — a publikuje je přes **webové rozhraní** a **SNMP**.
 Do zdroje se nijak nezasahuje — jen se „čte přes rameno“ jeho vlastní displej.
 
 > Vstupní/výstupní data čte z displeje, takže přesnost je omezená rozlišením displeje
@@ -34,7 +34,7 @@ Do zdroje se nijak nezasahuje — jen se „čte přes rameno“ jeho vlastní d
 
 ## Jak to funguje
 
-Displej MHpowru řídí budič **TM1640** po dvouvodičové sériové sběrnici (CLK + DIN).
+Displej MHpoweru řídí budič **TM1640** po dvouvodičové sériové sběrnici (CLK + DIN).
 ESP32 se na tyto dvě linky připojí jako **pasivní posluchač** a v těsné smyčce
 (s vypnutými přerušeními) navzorkuje GPIO. Z navzorkovaných hran pak softwarově
 zrekonstruuje TM1640 rámec.
@@ -75,11 +75,11 @@ děliči.
 - **Webový dashboard** (auto‑refresh): vstup/výstup, síť/baterie, zátěž, výkon, alarmy,
   výdrž na baterii, kondice baterie.
 - **Dvě úrovně přístupu** — správce (`admin`) vidí a mění vše, host (`guest`/`guest`) jen čte;
-  tlačítko **„odhlásit"** pro přepnutí uživatele.
+  tlačítko **„odhlásit“** pro přepnutí uživatele.
 - **Přepětí / podpětí (V↑ / V↓, AVR)** odvozené z dekódovaného vstupního napětí; podpora
   **24 V / 48 V** baterií a **14 modelů MPU** (300–5000 W, napětí baterie se zvolí automaticky).
 - **Odhad výdrže** s učením energie na jednotlivé dílky baterie (viz níže) — a **proaktivně i na síti**
-  („kdyby teď vypadl proud, vydrží ~X").
+  („kdyby teď vypadl proud, vydrží ~X“).
 - **SNMP v1** (UDP/161) — 49 OID pro integraci do monitoringu (Zabbix, LibreNMS, …).
 - **OTA aktualizace** firmwaru přes web (s progress barem).
 - **Diagnostika běhu** — důvod posledního restartu, uptime, heap, fragmentace, TX výkon,
@@ -135,7 +135,7 @@ Závislosti: **arduino‑esp32** (testováno na core 2.0.x i 3.x), standardní k
 
 ### Arduino IDE
 1. Otevři `firmware/mhpower_esp32_capture/mhpower_esp32_capture.ino`.
-2. Vyber svou ESP32 desku a **Partition Scheme s OTA** (default „4MB with spiffs“ stačí).
+2. Vyber svou ESP32 desku a **Partition Scheme s OTA** (výchozí „4MB with spiffs“ stačí).
 3. **Sketch → Export Compiled Binary** → vznikne `…ino.bin` vedle sketche.
 
 ### arduino‑cli
@@ -177,7 +177,7 @@ Vedle správce (`admin`) je ve firmwaru napevno účet **`guest` / `guest`** pro
 
 - `/` — **monitor** (dlaždice, auto‑refresh přes `/api/status`).
 - `/settings` — **systém** (jen správce): pojmenování, **přístup** (web login správce, SNMP community,
-  **NTP server**), **Wi‑Fi v samostatné sekci** (SSID + heslo — změna se projeví **až po restartu**
+  **NTP server**), **WiFi v samostatné sekci** (SSID + heslo — změna se projeví **až po restartu**
   zařízení), typ zdroje (14 modelů MPU 300–5000 W, napětí baterie 12/24/48 V se nastaví automaticky),
   kapacita a datum instalace baterie, minimální výdrž, práh kondice; sekce **Rozhraní (API)**, OTA a restart.
 
@@ -185,9 +185,9 @@ Vedle správce (`admin`) je ve firmwaru napevno účet **`guest` / `guest`** pro
 
 - **správce** — uživatel `admin` (heslo z nastavení): vidí a mění vše.
 - **host** — napevno **`guest` / `guest`**: **jen čtení** (dashboard, `/api/status`, `/api/events`),
-  nic nezmění. V dashboardu se mu skryje odkaz „systém" a ukáže odznak „jen čtení (host)".
+  nic nezmění. V dashboardu se mu skryje odkaz „systém“ a ukáže odznak „jen čtení (host)“.
 
-Odkaz **„odhlásit"** (v hlavičce monitoru i v systému) zahodí uložené přihlášení v prohlížeči
+Odkaz **„odhlásit“** (v hlavičce monitoru i v systému) zahodí uložené přihlášení v prohlížeči
 (přes `/logout`, který vrátí 401) — lze se tak přepnout mezi `admin` a `guest`.
 
 **API endpointy:**
@@ -268,7 +268,7 @@ Diagnostické OID (39–44): **39** uptime [s], **40** min volný heap [B], **41
 Identifikace desky: **45** (str) HW ID = MAC desky (`AA:BB:CC:DD:EE:FF`) — trvalý otisk, nemění se reflashem ani smazáním nastavení; slouží k odlišení více kusů v jednom racku.
 
 Síť a výdrž: **46** přepětí (1/0), **47** podpětí (1/0), **48** (str) stav AVR (síť v normě / V↑ / V↓),
-**49** proaktivní odhad výdrže [s] (i na síti = „kdyby teď vypadl proud").
+**49** proaktivní odhad výdrže [s] (i na síti = „kdyby teď vypadl proud“).
 
 Příklad: `snmpwalk -v1 -c public <IP> 1.3.6.1.4.1.53864.1.1`
 
