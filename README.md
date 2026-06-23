@@ -152,15 +152,33 @@ char webPass[33]  = "changeme";        // heslo do webu (uživatel "admin")
 Po připojení už jde vše měnit ve webu (**systém**) a ukládá se do flash (NVS) —
 hodnoty v kódu slouží jen jako výchozí při čistém zařízení.
 
+Vedle správce (`admin`) je ve firmwaru napevno účet **`guest` / `guest`** pro **jen čtení**
+(vidí hodnoty, nic nezmění). Heslo správce se mění ve webu, guest je fixní.
+
 ---
 
 ## Webové rozhraní
 
 - `/` — **monitor** (dlaždice, auto‑refresh přes `/api/status`).
-- `/settings` — **systém**: pojmenování, WiFi, web login, SNMP community, **NTP server**, typ zdroje
-  (300/500/700/800 W), kapacita a datum instalace baterie,
-  minimální výdrž, práh kondice; OTA a restart.
-- `/api/status` — JSON se všemi hodnotami (chráněno HTTP Basic auth).
+- `/settings` — **systém** (jen správce): pojmenování, **přístup** (web login správce, SNMP community,
+  **NTP server**), **Wi‑Fi v samostatné sekci** (SSID + heslo — změna se projeví **až po restartu**
+  zařízení), typ zdroje (14 modelů MPU 300–5000 W, napětí baterie 12/24/48 V se nastaví automaticky),
+  kapacita a datum instalace baterie, minimální výdrž, práh kondice; sekce **Rozhraní (API)**, OTA a restart.
+
+**Přihlášení (HTTP Basic auth) — dvě úrovně:**
+
+- **správce** — uživatel `admin` (heslo z nastavení): vidí a mění vše.
+- **host** — napevno **`guest` / `guest`**: **jen čtení** (dashboard, `/api/status`, `/api/events`),
+  nic nezmění. V dashboardu se mu skryje odkaz „systém" a ukáže odznak „jen čtení (host)".
+
+Odkaz **„odhlásit"** (v hlavičce monitoru i v systému) zahodí uložené přihlášení v prohlížeči
+(přes `/logout`, který vrátí 401) — lze se tak přepnout mezi `admin` a `guest`.
+
+**API endpointy:**
+
+- `/api/status` — JSON se všemi hodnotami (+ pole `isAdmin`); čte host i správce.
+- `/api/events` — JSON posledních událostí; čte host i správce.
+- `/api/digitscan`, `/api/iconscan` — textové vývojové skeny displeje (jen správce).
 
 Dlaždice **Diagnostika** ukazuje:
 `rámců N / heap (min, blok) / err / filtr / cap / tout | běh / reset: … / TX … dBm / CPU … MHz / dílky x/5`.
