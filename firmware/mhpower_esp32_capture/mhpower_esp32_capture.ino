@@ -1186,7 +1186,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
   </style>
 </head>
 <body>
-  <header><h1><span id="pageTitle">Monitoring zdroje MHpower 500W</span> <span class="small" id="deviceName"></span></h1><div class="small"><span id="age">...</span><span id="roBadge" style="display:none"> | jen čtení (host)</span><span id="adminLink" style="display:none"> | <a href="/settings">systém</a></span> | ID <span id="hwId">-</span></div></header>
+  <header><h1><span id="pageTitle">Monitoring zdroje MHpower 500W</span> <span class="small" id="deviceName"></span></h1><div class="small"><span id="age">...</span><span id="roBadge" style="display:none"> | jen čtení (host)</span><span id="adminLink" style="display:none"> | <a href="/settings">systém</a></span> | ID <span id="hwId">-</span> | <a href="/logout" id="logoutLink">odhlásit</a></div></header>
   <main>
     <span id="modelWatts" style="display:none">500</span>
     <div class="banner" id="batteryBanner">BĚH NA BATERII</div>
@@ -1207,7 +1207,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     <div class="status" id="pills"></div>
     <h2 class="label" style="margin:18px 0 8px;font-size:14px">Poslední události</h2>
     <div id="events" class="small"></div>
-    <div class="footer">Pavel Vlcek v1.15 hkfree.org</div>
+    <div class="footer">Pavel Vlcek v1.16 hkfree.org</div>
   </main>
   <script>
     function val(v){return v===null||v===undefined||v<0?'-':v}
@@ -1233,6 +1233,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       batteryText.textContent=(j.overheat?'teplotní alarm':(j.criticalBattery?'kritický stav před vypnutím':(j.charging?'nabíjení':((j.batteryState||'')+(j.batteryVoltageEstimate!==null&&j.batteryVoltageEstimate!==undefined?' / '+Number(j.batteryVoltageEstimate).toFixed(1)+' V':'')))))+' / '+batAh+' Ah / zdraví '+batHealth+' %';loadText.textContent=j.loadState||'';
       rssi.textContent=signed(j.rssi);ip.innerHTML='IP '+(j.ip||'-')+'<br>maska '+(j.mask||'-')+'<br>brána '+(j.gw||'-')+'<br>DNS '+(j.dns||'-');diag.textContent='rámců '+val(j.frames)+' / heap '+val(j.freeHeap)+' (min '+val(j.minFreeHeap)+', blok '+val(j.maxAllocHeap)+') / err '+val(j.errors)+' / filtr '+val(j.filtered)+' / cap '+val(j.captureOk)+' / tout '+val(j.captureTimeouts)+' | běh '+fmtTime(j.uptimeSec)+' / reset: '+(j.resetReason||'?')+' / TX '+(j.txPowerDbm!==undefined?Number(j.txPowerDbm).toFixed(1)+' dBm':'?')+' / CPU '+val(j.cpuMhz)+' MHz / dílky '+val(j.barsLearned)+'/5'+(j.learnedUsableWh?' ('+val(j.learnedUsableWh)+' Wh)':'');
       let ps='';ps+=pill(j.mainsPresent?'Síť přítomna':'Bez sítě',j.mainsPresent?'good':'bad');if(j.onBattery)ps+=pill('BĚH NA BATERII','bad');if(j.overheat)ps+=pill('PŘEHŘÁTÍ','bad');if(j.criticalBattery)ps+=pill('BATERIE 0 %','bad');if(j.charging)ps+=pill('Nabíjení','good');if(j.batteryFull)ps+=pill('Baterie plná','good');if(j.lowBattery)ps+=pill('Nízká baterie','bad');if(j.overload)ps+=pill('Přetížení','bad');if(j.overVoltage)ps+=pill('PŘEPĚTÍ V↑','warn');if(j.underVoltage)ps+=pill('PODPĚTÍ V↓','warn');if(j.alarm&&!j.overheat)ps+=pill('Alarm','bad');if(j.healthWarning)ps+=pill('Kondice baterie nízká','warn');if(j.runtimeWarning)ps+=pill('Výdrž pod limitem','warn');pills.innerHTML=ps;renderEvents()}
+    document.getElementById('logoutLink').addEventListener('click',function(e){e.preventDefault();var x=new XMLHttpRequest();x.open('GET','/logout',true,'logout','logout');x.onloadend=function(){location.replace('/')};x.send();});
     setInterval(tick,3000);tick();
   </script>
 </body>
@@ -1469,7 +1470,7 @@ void handleSettings() {
     html += F(" - ");
     html += escHtml(settings.deviceName);
   }
-  html += F("</h1></header><main><p><a href='/'>zpět na monitor</a></p>");
+  html += F("</h1></header><main><p><a href='/'>zpět na monitor</a> | <a href='/logout' id='logoutLink'>odhlásit</a></p>");
   if (server.hasArg("saved")) html += F("<p class='note'>Uloženo.</p>");
   html += F("<form method='post' action='/settings'>");
 
@@ -1549,7 +1550,8 @@ void handleSettings() {
   html += F("<form method='post' action='/restart'><button class='restart' type='submit'>Restartovat ESP32</button></form></div>");
   html += F("</section>");
 
-  html += F("<div class='footer'>Pavel Vlcek v1.15 hkfree.org</div></main>");
+  html += F("<div class='footer'>Pavel Vlcek v1.16 hkfree.org</div></main>");
+  html += F("<script>(function(){var l=document.getElementById('logoutLink');if(l)l.addEventListener('click',function(e){e.preventDefault();var x=new XMLHttpRequest();x.open('GET','/logout',true,'logout','logout');x.onloadend=function(){location.replace('/')};x.send();});})();</script>");
   html += F("<script>(function(){var f=document.getElementById('fwform');if(!f)return;"
             "f.addEventListener('submit',function(e){e.preventDefault();"
             "var fi=document.getElementById('fwfile');if(!fi.files.length){return}"
@@ -1568,6 +1570,14 @@ void handleRestart() {
   server.send(200, "text/plain", "Restartuji ESP32");
   delay(500);
   ESP.restart();
+}
+
+// Odhlášení / přepnutí uživatele: vždy vrátí 401. Web (odkaz „odhlásit") na něj
+// pošle XHR s neplatnými údaji „logout/logout" → prohlížeč zahodí uložené Basic-auth
+// přihlášení a při dalším požadavku znovu vyzve k zadání (lze se přihlásit jako jiný uživatel).
+void handleLogout() {
+  lastWebReqMs = millis();
+  server.requestAuthentication();
 }
 
 void handleUpdatePage() {
@@ -2080,7 +2090,7 @@ void sendDigitScan() {
   const uint8_t col = unkLog.lastPos % 3;   // 0=stovky 1=desitky 2=jednotky
   const char* colName = col == 0 ? "stovky" : (col == 1 ? "desitky" : "jednotky");
   int n = snprintf(responseBody, sizeof(responseBody),
-                   "nezname cislice displeje - fw v1.15\n"
+                   "nezname cislice displeje - fw v1.16\n"
                    "celkem zachyceno: %lu\n", (unsigned long)unkLog.total);
   if (unkLog.total) {
     const int8_t g = guessDigitFromSegments(unkLog.lastPattern);
@@ -2118,7 +2128,7 @@ void handleDigitScan() {
 
 void sendIconScan() {
   int n = snprintf(responseBody, sizeof(responseBody),
-                   "icon-scan ikon displeje (hledame V-nahoru/V-dolu pri prepeti/podpeti) - fw v1.15\n"
+                   "icon-scan ikon displeje (hledame V-nahoru/V-dolu pri prepeti/podpeti) - fw v1.16\n"
                    "celkem vzorku: %lu | normalni pasmo vstupu 207-253 V\n"
                    "mem[6]=mode, mem[8]=ikony; porovnej hodnoty pri prepeti/podpeti s normalem.\n",
                    (unsigned long)iconLog.total);
@@ -2188,6 +2198,7 @@ void setupWifiAndWeb() {
   server.on("/settings", HTTP_GET, handleSettings);
   server.on("/settings", HTTP_POST, handleSettings);
   server.on("/restart", HTTP_POST, handleRestart);
+  server.on("/logout", handleLogout);
   server.on("/update", HTTP_GET, handleUpdatePage);
   server.on("/update", HTTP_POST, handleUpdateDone, handleUpdateUpload);
   server.on("/api/events", handleEvents);
