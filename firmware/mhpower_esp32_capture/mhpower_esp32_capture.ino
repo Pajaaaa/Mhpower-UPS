@@ -1129,9 +1129,31 @@ void printHex2(Stream& out, uint8_t v) {
   out.print(v, HEX);
 }
 
-bool requireAuth() {
+// Host (guest) přístup je napevno ve firmwaru — smí jen ČÍST hodnoty (dashboard,
+// /api/status, /api/events). Nesmí nic měnit: nastavení, restart, OTA i dev-scany
+// (digit/icon) zůstávají jen adminovi (settings.webUser / settings.webPass).
+const char GUEST_USER[] = "guest";
+const char GUEST_PASS[] = "guest";
+
+enum AuthLevel { AUTH_NONE = 0, AUTH_GUEST = 1, AUTH_ADMIN = 2 };
+
+AuthLevel webAuthLevel() {
   lastWebReqMs = millis();   // dorazil HTTP požadavek -> web server prokazatelně žije
-  if (server.authenticate(settings.webUser, settings.webPass)) return true;
+  if (server.authenticate(settings.webUser, settings.webPass)) return AUTH_ADMIN;
+  if (server.authenticate(GUEST_USER, GUEST_PASS)) return AUTH_GUEST;
+  return AUTH_NONE;
+}
+
+// admin-only endpointy (změny nastavení, restart, OTA, dev-scany)
+bool requireAuth() {
+  if (webAuthLevel() == AUTH_ADMIN) return true;
+  server.requestAuthentication();
+  return false;
+}
+
+// read-only endpointy — pustí guesta i admina (host ale nic nezmění)
+bool requireRead() {
+  if (webAuthLevel() != AUTH_NONE) return true;
   server.requestAuthentication();
   return false;
 }
@@ -1164,7 +1186,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
   </style>
 </head>
 <body>
-  <header><h1><span id="pageTitle">Monitoring zdroje MHpower 500W</span> <span class="small" id="deviceName"></span></h1><div class="small"><span id="age">...</span> | <a href="/settings">systém</a> | ID <span id="hwId">-</span></div></header>
+  <header><h1><span id="pageTitle">Monitoring zdroje MHpower 500W</span> <span class="small" id="deviceName"></span></h1><div class="small"><span id="age">...</span><span id="roBadge" style="display:none"> | jen čtení (host)</span><span id="adminLink" style="display:none"> | <a href="/settings">systém</a></span> | ID <span id="hwId">-</span></div></header>
   <main>
     <span id="modelWatts" style="display:none">500</span>
     <div class="banner" id="batteryBanner">BĚH NA BATERII</div>
@@ -1176,8 +1198,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       <div class="tile" id="sourceTile"><div class="label">Zdroj</div><div class="value" id="source">-</div></div>
       <div class="tile"><div class="label">Baterie</div><div class="value" id="batteryValue">-</div><div class="bars" id="batteryBars"></div><div class="small" id="batteryText"></div></div>
       <div class="tile"><div class="label">Běh na baterii</div><div class="value" id="runtimeNow">-</div><div class="small" id="runtimeText"></div></div>
-      <div class="tile"><div class="label">Zátěž</div><div class="value"><span id="loadPercent">-</span><span class="unit">%</span></div><div class="bars" id="loadBars"></div><div class="small" id="loadText"></div></div>
-      <div class="tile"><div class="label">Výkon</div><div class="value"><span id="loadWatts">-</span><span class="unit">W</span></div></div>
+      <div class="tile"><div class="label">Zátěž</div><div class="value"><span id="loadPercent">-</span><span class="unit">%</span> <span id="loadWatts">-</span><span class="unit">W</span></div><div class="bars" id="loadBars"></div><div class="small" id="loadText"></div></div>
       <div class="tile"><div class="label">Alarm</div><div class="value" id="alarm">-</div></div>
       <div class="tile"><div class="label">Data</div><div class="value" id="online">-</div></div>
       <div class="tile"><div class="label">Wi-Fi</div><div class="value"><span id="rssi">-</span><span class="unit">dBm</span></div><div class="small" id="ip"></div></div>
@@ -1186,7 +1207,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     <div class="status" id="pills"></div>
     <h2 class="label" style="margin:18px 0 8px;font-size:14px">Poslední události</h2>
     <div id="events" class="small"></div>
-    <div class="footer">Pavel Vlcek v1.13 hkfree.org</div>
+    <div class="footer">Pavel Vlcek v1.15 hkfree.org</div>
   </main>
   <script>
     function val(v){return v===null||v===undefined||v<0?'-':v}
@@ -1201,6 +1222,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       if(j.settings&&j.settings.sourceWatts){modelWatts.textContent=j.settings.sourceWatts;pageTitle.textContent='Monitoring zdroje MHpower '+j.settings.sourceWatts+'W'}
       deviceName.textContent=(j.settings&&j.settings.deviceName)?' - '+j.settings.deviceName:'';
       if(j.hwId)hwId.textContent=j.hwId;
+      adminLink.style.display=j.isAdmin?'':'none';roBadge.style.display=j.isAdmin?'none':'inline';
       source.textContent=j.onBattery?'BATERIE':(j.mainsPresent?'SÍŤ':'-');sourceTile.classList.toggle('danger',!!j.onBattery);sourceTile.classList.toggle('goodsource',!!j.mainsPresent&&!j.onBattery);batteryBanner.classList.toggle('on',!!j.onBattery);
       alarm.textContent=j.overheat?'TEPLOTA':(j.alarm?'ANO':'OK');online.textContent=j.online?'OK':'OFF';age.textContent='poslední data '+val(j.lastAgeMs)+' ms';
       bars('batteryBars',j.overheat?1:(j.criticalBattery?1:(j.charging?5:j.batteryBars)),5,j.overheat?'critical':(j.criticalBattery?'critical':(j.charging?'charge':'')));bars('loadBars',j.loadLevel,5,'load');
@@ -1217,13 +1239,13 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 </html>
 )HTML";
 
-void sendStatusJson() {
+void sendStatusJson(bool isAdmin) {
   const uint32_t age = state.lastFrameMs == 0 ? 0xFFFFFFFFUL : millis() - state.lastFrameMs;
   const bool online = state.lastFrameMs != 0 && age <= FRAME_STALE_MS;
   int learnedUsableWh = 0;
   for (uint8_t b = 0; b <= 5; b++) if (learnedBarSamples[b] > 0) learnedUsableWh += (int)(learnedWhPerBar[b] + 0.5f);
   snprintf(responseBody, sizeof(responseBody),
-    "{\"online\":%s,\"frames\":%lu,\"inputVoltage\":%d,\"outputVoltage\":%d,"
+    "{\"isAdmin\":%s,\"online\":%s,\"frames\":%lu,\"inputVoltage\":%d,\"outputVoltage\":%d,"
     "\"frequencyHz\":50,\"mainsPresent\":%s,\"onBattery\":%s,\"sourceState\":\"%s\","
     "\"alarm\":%s,\"overheat\":%s,\"lowBattery\":%s,\"criticalBattery\":%s,\"charging\":%s,\"batteryFull\":%s,"
     "\"batteryState\":\"%s\",\"batteryVoltageEstimate\":%.1f,\"batteryVoltageRange\":\"%s\","
@@ -1242,6 +1264,7 @@ void sendStatusJson() {
     "\"hwId\":\"%s\","
     "\"settings\":{\"deviceName\":\"%s\",\"sourceWatts\":%u,\"batteryAh\":%.1f,\"batterySystemVoltage\":%u,\"batteryInstallDate\":\"%s\","
     "\"healthWarnPercent\":%u,\"minRuntimeMinutes\":%u}}",
+    isAdmin ? "true" : "false",
     online ? "true" : "false",
     (unsigned long)state.frameCount,
     state.inputVoltage, state.outputVoltage,
@@ -1310,13 +1333,14 @@ void sendStatusJson() {
 }
 
 void handleRoot() {
-  if (!requireAuth()) return;
+  if (!requireRead()) return;   // dashboard smí vidět i host
   server.send_P(200, "text/html", INDEX_HTML);
 }
 
 void handleStatus() {
-  if (!requireAuth()) return;
-  sendStatusJson();
+  const AuthLevel lvl = webAuthLevel();   // guest i admin smí číst hodnoty
+  if (lvl == AUTH_NONE) { server.requestAuthentication(); return; }
+  sendStatusJson(lvl == AUTH_ADMIN);
 }
 
 String escHtml(const char* s) {
@@ -1449,19 +1473,25 @@ void handleSettings() {
   if (server.hasArg("saved")) html += F("<p class='note'>Uloženo.</p>");
   html += F("<form method='post' action='/settings'>");
 
-  html += F("<h2 class='sectionTitle'>Zařízení a síť</h2><section class='grid'>");
+  html += F("<h2 class='sectionTitle'>Zařízení a přístup</h2><section class='grid'>");
   html += F("<div class='field'><label>Pojmenování zdroje</label><input name='devName' maxlength='32' value='");
   html += escHtml(settings.deviceName);
-  html += F("'></div><div class='field'><label>Wi-Fi SSID</label><input name='ssid' maxlength='32' value='");
-  html += escHtml(settings.wifiSsid);
-  html += F("'></div><div class='field'><label>Wi-Fi heslo</label><input name='pass' maxlength='64' type='password' placeholder='(beze změny)' value='");
-  html += F("'></div><div class='field'><label>Web uživatel</label><input name='webUser' maxlength='16' value='");
+  html += F("'></div><div class='field'><label>Web uživatel (správce)</label><input name='webUser' maxlength='16' value='");
   html += escHtml(settings.webUser);
-  html += F("'></div><div class='field'><label>Web heslo</label><input name='webPass' maxlength='32' type='password' placeholder='(beze změny)' value='");
+  html += F("'></div><div class='field'><label>Web heslo (správce)</label><input name='webPass' maxlength='32' type='password' placeholder='(beze změny)' value='");
   html += F("'></div><div class='field'><label>SNMP community</label><input name='snmp' maxlength='32' value='");
   html += escHtml(settings.snmpCommunity);
   html += F("'></div><div class='field'><label>NTP server</label><input name='ntp' maxlength='47' value='");
   html += escHtml(settings.ntpServer);
+  html += F("'></div></section>");
+  html += F("<p class='note'>Jen pro čtení existuje napevno účet <b>guest</b> / heslo <b>guest</b> &mdash; vidí dashboard a hodnoty, ale nic nezmění.</p>");
+
+  html += F("<h2 class='sectionTitle'>Wi-Fi připojení</h2>");
+  html += F("<p class='note' style='color:#ffd479'><b>Pozor:</b> změnu Wi-Fi je nutné po uložení potvrdit <b>restartem zařízení</b> (sekce Firmware a údržba níže) &mdash; jinak se nová síť nepoužije.</p>");
+  html += F("<section class='grid'>");
+  html += F("<div class='field'><label>Wi-Fi SSID</label><input name='ssid' maxlength='32' value='");
+  html += escHtml(settings.wifiSsid);
+  html += F("'></div><div class='field'><label>Wi-Fi heslo</label><input name='pass' maxlength='64' type='password' placeholder='(beze změny)' value='");
   html += F("'></div></section>");
   html += F("<p class='note'>Když se Wi-Fi nepřipojí (do 15 s po startu nebo po 5 min výpadku), naskočí záchranný hotspot <b>");
   html += escHtml(apSsid().c_str());
@@ -1513,7 +1543,7 @@ void handleSettings() {
   html += F("<form method='post' action='/restart'><button class='restart' type='submit'>Restartovat ESP32</button></form></div>");
   html += F("</section>");
 
-  html += F("<div class='footer'>Pavel Vlcek v1.13 hkfree.org</div></main>");
+  html += F("<div class='footer'>Pavel Vlcek v1.15 hkfree.org</div></main>");
   html += F("<script>(function(){var f=document.getElementById('fwform');if(!f)return;"
             "f.addEventListener('submit',function(e){e.preventDefault();"
             "var fi=document.getElementById('fwfile');if(!fi.files.length){return}"
@@ -2027,7 +2057,7 @@ void sendEventsJson() {
   server.send(200, "application/json", responseBody);
 }
 void handleEvents() {
-  if (!requireAuth()) return;
+  if (!requireRead()) return;   // poslední události smí číst i host
   sendEventsJson();
 }
 
@@ -2044,7 +2074,7 @@ void sendDigitScan() {
   const uint8_t col = unkLog.lastPos % 3;   // 0=stovky 1=desitky 2=jednotky
   const char* colName = col == 0 ? "stovky" : (col == 1 ? "desitky" : "jednotky");
   int n = snprintf(responseBody, sizeof(responseBody),
-                   "nezname cislice displeje - fw v1.13\n"
+                   "nezname cislice displeje - fw v1.15\n"
                    "celkem zachyceno: %lu\n", (unsigned long)unkLog.total);
   if (unkLog.total) {
     const int8_t g = guessDigitFromSegments(unkLog.lastPattern);
@@ -2082,7 +2112,7 @@ void handleDigitScan() {
 
 void sendIconScan() {
   int n = snprintf(responseBody, sizeof(responseBody),
-                   "icon-scan ikon displeje (hledame V-nahoru/V-dolu pri prepeti/podpeti) - fw v1.13\n"
+                   "icon-scan ikon displeje (hledame V-nahoru/V-dolu pri prepeti/podpeti) - fw v1.15\n"
                    "celkem vzorku: %lu | normalni pasmo vstupu 207-253 V\n"
                    "mem[6]=mode, mem[8]=ikony; porovnej hodnoty pri prepeti/podpeti s normalem.\n",
                    (unsigned long)iconLog.total);
