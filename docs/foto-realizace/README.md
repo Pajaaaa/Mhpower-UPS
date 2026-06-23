@@ -17,3 +17,6 @@ Pořízeno 23. 6. 2026.
 Souvislosti: zapojení přes Schmittův invertor viz [`../zapojeni_spravne.png`](../zapojeni_spravne.png)
 a [HISTORIE → Schmittův trigger](../HISTORIE.md). Síťová brána mAP popsána v
 [`../../network/README.md`](../../network/README.md).
+
+Soubory `hero-*.jpg` a `thumb-*.jpg` jsou zmenšené náhledy (odvozené z výše uvedených fotek)
+použité v úvodním [`README.md`](../../README.md) — originály v plném rozlišení jsou ty číslované.
