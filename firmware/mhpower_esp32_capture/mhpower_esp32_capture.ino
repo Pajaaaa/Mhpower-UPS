@@ -1531,7 +1531,13 @@ void handleSettings() {
 
   html += F("<p class='note'>Změna kapacity nebo data baterie resetuje naučenou kondici na 100 %.</p>");
   html += F("<button type='submit'>Uložit nastavení</button></form>");
-  html += F("<p class='note'>SNMP v1 UDP/161, OID 1.3.6.1.4.1.53864.1.1</p>");
+
+  html += F("<h2 class='sectionTitle'>Rozhraní (API)</h2><section class='grid'>");
+  html += F("<div class='field'><label>HTTP API (JSON)</label><a href='/api/status' target='_blank'>/api/status</a> &mdash; živý stav zdroje<br><a href='/api/events' target='_blank'>/api/events</a> &mdash; poslední události</div>");
+  html += F("<div class='field'><label>Dev-skeny (text)</label><a href='/api/digitscan' target='_blank'>/api/digitscan</a> &mdash; neznámé číslice displeje<br><a href='/api/iconscan' target='_blank'>/api/iconscan</a> &mdash; ikony při přepětí/podpětí</div>");
+  html += F("<div class='field'><label>SNMP v1</label>UDP/161, community dle nastavení<br>OID 1.3.6.1.4.1.53864.1.1 (idx 1&ndash;49)</div>");
+  html += F("</section>");
+  html += F("<p class='note'>API i dev-skeny vyžadují přihlášení správce; host (jen čtení) se přihlásí na <code>/api/status</code> a <code>/api/events</code>.</p>");
 
   html += F("<h2 class='sectionTitle'>Firmware a údržba</h2><section class='grid'>");
   html += F("<div class='field'><form id='fwform' method='POST' action='/update' enctype='multipart/form-data'>");
