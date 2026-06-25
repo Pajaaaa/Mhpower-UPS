@@ -1207,7 +1207,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     <div class="status" id="pills"></div>
     <h2 class="label" style="margin:18px 0 8px;font-size:14px">Poslední události</h2>
     <div id="events" class="small"></div>
-    <div class="footer">Pavel Vlcek v1.16 hkfree.org</div>
+    <div class="footer">Pavel Vlcek v1.17 hkfree.org</div>
   </main>
   <script>
     function val(v){return v===null||v===undefined||v<0?'-':v}
@@ -1550,7 +1550,7 @@ void handleSettings() {
   html += F("<form method='post' action='/restart'><button class='restart' type='submit'>Restartovat ESP32</button></form></div>");
   html += F("</section>");
 
-  html += F("<div class='footer'>Pavel Vlcek v1.16 hkfree.org</div></main>");
+  html += F("<div class='footer'>Pavel Vlcek v1.17 hkfree.org</div></main>");
   html += F("<script>(function(){var l=document.getElementById('logoutLink');if(l)l.addEventListener('click',function(e){e.preventDefault();var x=new XMLHttpRequest();x.open('GET','/logout',true,'logout','logout');x.onloadend=function(){location.replace('/')};x.send();});})();</script>");
   html += F("<script>(function(){var f=document.getElementById('fwform');if(!f)return;"
             "f.addEventListener('submit',function(e){e.preventDefault();"
@@ -1629,7 +1629,7 @@ void handleUpdateDone() {
 
 const uint32_t SNMP_BASE_OID[] = {1, 3, 6, 1, 4, 1, 53864, 1, 1};
 const uint8_t SNMP_BASE_LEN = sizeof(SNMP_BASE_OID) / sizeof(SNMP_BASE_OID[0]);
-const uint8_t SNMP_MAX_INDEX = 48;
+const uint8_t SNMP_MAX_INDEX = 49;  // idx 49 = runtimeProjectedSec (odhad výdrže na síti); dřív 48 → .49 byl nedostupný
 
 bool readBerLen(const uint8_t* data, int total, int& pos, int& len) {
   if (pos >= total) return false;
@@ -2090,7 +2090,7 @@ void sendDigitScan() {
   const uint8_t col = unkLog.lastPos % 3;   // 0=stovky 1=desitky 2=jednotky
   const char* colName = col == 0 ? "stovky" : (col == 1 ? "desitky" : "jednotky");
   int n = snprintf(responseBody, sizeof(responseBody),
-                   "nezname cislice displeje - fw v1.16\n"
+                   "nezname cislice displeje - fw v1.17\n"
                    "celkem zachyceno: %lu\n", (unsigned long)unkLog.total);
   if (unkLog.total) {
     const int8_t g = guessDigitFromSegments(unkLog.lastPattern);
@@ -2128,7 +2128,7 @@ void handleDigitScan() {
 
 void sendIconScan() {
   int n = snprintf(responseBody, sizeof(responseBody),
-                   "icon-scan ikon displeje (hledame V-nahoru/V-dolu pri prepeti/podpeti) - fw v1.16\n"
+                   "icon-scan ikon displeje (hledame V-nahoru/V-dolu pri prepeti/podpeti) - fw v1.17\n"
                    "celkem vzorku: %lu | normalni pasmo vstupu 207-253 V\n"
                    "mem[6]=mode, mem[8]=ikony; porovnej hodnoty pri prepeti/podpeti s normalem.\n",
                    (unsigned long)iconLog.total);
