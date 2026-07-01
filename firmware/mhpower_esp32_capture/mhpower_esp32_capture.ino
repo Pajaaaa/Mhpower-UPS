@@ -27,8 +27,8 @@
 #define USE_TASK_WDT 1
 const uint32_t WDT_TIMEOUT_S = 15;       // hardwarová pojistka proti zaseknutí
 const uint32_t WIFI_RETRY_MS = 15000;    // po této době bez WiFi zkusit reconnect
-const uint32_t WIFI_FALLBACK_MS = 300000;// po 5 min bez WiFi nahodit záchranný hotspot (AP)
-const uint32_t WIFI_HARD_REBOOT_MS = 3600000;  // 1 h bez WiFi i bez klientů na hotspotu -> tvrdý reboot (poslední pojistka)
+const uint32_t WIFI_FALLBACK_MS = 60000; // po 1 min bez WiFi nahodit záchranný hotspot (AP) — dřív bylo 5 min, moc pomalé
+const uint32_t WIFI_HARD_REBOOT_MS = 600000;   // 10 min bez WiFi i bez klientů na hotspotu -> tvrdý reboot (poslední pojistka)
 const uint32_t WEB_REINIT_MS = 600000;   // 10 min bez obslouženého HTTP požadavku -> recyklace listen socketu (pojistka proti zaseknutému webu)
 const char* const AP_FALLBACK_PASS = "mhpower-setup";  // WPA2 heslo hotspotu (min. 8 znaků)
 const uint8_t  EVENT_LOG_SIZE = 16;      // kruhový log událostí
@@ -239,6 +239,8 @@ uint32_t minFreeHeapBoot = 0;
 // --- WiFi dohled (aktivní reconnect + záchranný hotspot) ---
 uint32_t lastWifiOkMs = 0;
 uint32_t lastWifiRetryMs = 0;
+uint32_t lastApTryMs = 0;        // poslední pokus nahodit záchranný hotspot (throttle při selhání softAP)
+volatile bool wifiGotIp = false; // GOT_IP nastaví flag; bind/mDNS se dodělá z loop() (NE v kontextu WiFi eventu)
 bool apFallbackActive = false;   // běží záchranný AP hotspot (WiFi se nepřipojila)
 uint32_t lastWebReqMs = 0;       // čas posledního obslouženého HTTP požadavku (liveness web serveru)
 
@@ -1207,7 +1209,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     <div class="status" id="pills"></div>
     <h2 class="label" style="margin:18px 0 8px;font-size:14px">Poslední události</h2>
     <div id="events" class="small"></div>
-    <div class="footer">Pavel Vlcek v1.17 hkfree.org</div>
+    <div class="footer">Pavel Vlcek v1.18 hkfree.org</div>
   </main>
   <script>
     function val(v){return v===null||v===undefined||v<0?'-':v}
@@ -1494,7 +1496,7 @@ void handleSettings() {
   html += escHtml(settings.wifiSsid);
   html += F("'></div><div class='field'><label>Wi-Fi heslo</label><input name='pass' maxlength='64' type='password' placeholder='(beze změny)' value='");
   html += F("'></div></section>");
-  html += F("<p class='note'>Když se Wi-Fi nepřipojí (do 15 s po startu nebo po 5 min výpadku), naskočí záchranný hotspot <b>");
+  html += F("<p class='note'>Když se Wi-Fi nepřipojí (do 15 s po startu nebo po 1 min výpadku), naskočí záchranný hotspot <b>");
   html += escHtml(apSsid().c_str());
   html += F("</b> (heslo <b>");
   html += AP_FALLBACK_PASS;
@@ -1550,7 +1552,7 @@ void handleSettings() {
   html += F("<form method='post' action='/restart'><button class='restart' type='submit'>Restartovat ESP32</button></form></div>");
   html += F("</section>");
 
-  html += F("<div class='footer'>Pavel Vlcek v1.17 hkfree.org</div></main>");
+  html += F("<div class='footer'>Pavel Vlcek v1.18 hkfree.org</div></main>");
   html += F("<script>(function(){var l=document.getElementById('logoutLink');if(l)l.addEventListener('click',function(e){e.preventDefault();var x=new XMLHttpRequest();x.open('GET','/logout',true,'logout','logout');x.onloadend=function(){location.replace('/')};x.send();});})();</script>");
   html += F("<script>(function(){var f=document.getElementById('fwform');if(!f)return;"
             "f.addEventListener('submit',function(e){e.preventDefault();"
@@ -1967,8 +1969,7 @@ void onWifiEvent(WiFiEvent_t event) {
   switch (event) {
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
       lastWifiOkMs = millis();
-      bindSnmpUdp();
-      startMdns();   // přehlásit mDNS po (re)connectu
+      wifiGotIp = true;   // bind SNMP + mDNS dodělá maintainWifi() z loop tasku (v event kontextu hrozí deadlock lwIP/mDNS)
       Serial.printf("[WiFi] IP %s\n", WiFi.localIP().toString().c_str());
       break;
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
@@ -2001,8 +2002,12 @@ String apSsid() {
 void startApFallback() {
   if (apFallbackActive) return;
   WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP(apSsid().c_str(), AP_FALLBACK_PASS);
+  const bool ok = WiFi.softAP(apSsid().c_str(), AP_FALLBACK_PASS);
   WiFi.setTxPower(WIFI_TX_POWER);
+  if (!ok) {   // AP se nenahodil (zaseknutý driver po výpadku) -> NEnastavovat active, zkusit příště znovu
+    Serial.println("[WiFi] softAP selhal, zkusim znovu");
+    return;
+  }
   apFallbackActive = true;
   Serial.printf("[WiFi] zachranny hotspot %s / %s -> http://%s\n",
                 apSsid().c_str(), AP_FALLBACK_PASS, WiFi.softAPIP().toString().c_str());
@@ -2026,14 +2031,19 @@ void maintainWifi() {
   if (WiFi.status() == WL_CONNECTED) {
     lastWifiOkMs = now;
     if (apFallbackActive) stopApFallback();
+    if (wifiGotIp) { wifiGotIp = false; bindSnmpUdp(); startMdns(); }  // dodělat mimo WiFi event kontext
     return;
   }
   if (lastWifiOkMs == 0) lastWifiOkMs = now;
   // místo nekonečného restartu (ten by špatně zadanou WiFi nikdy neopravil) nahodíme hotspot
-  if (!apFallbackActive && now - lastWifiOkMs > WIFI_FALLBACK_MS) startApFallback();
-  // poslední pojistka: hodina bez STA a nikdo není připojený na hotspot -> tvrdý reboot
+  // (a když softAP selže, apFallbackActive zůstane false -> zkusíme znovu, ale ne každou smyčku)
+  if (!apFallbackActive && now - lastWifiOkMs > WIFI_FALLBACK_MS && now - lastApTryMs > WIFI_RETRY_MS) {
+    lastApTryMs = now;
+    startApFallback();
+  }
+  // poslední pojistka: 10 min bez STA a nikdo není připojený na hotspot -> tvrdý reboot
   if (now - lastWifiOkMs > WIFI_HARD_REBOOT_MS && WiFi.softAPgetStationNum() == 0) {
-    Serial.println("[WiFi] >1 h bez WiFi a bez klientu -> restart");
+    Serial.println("[WiFi] 10 min bez WiFi a bez klientu -> restart");
     delay(50);
     ESP.restart();
   }
@@ -2090,7 +2100,7 @@ void sendDigitScan() {
   const uint8_t col = unkLog.lastPos % 3;   // 0=stovky 1=desitky 2=jednotky
   const char* colName = col == 0 ? "stovky" : (col == 1 ? "desitky" : "jednotky");
   int n = snprintf(responseBody, sizeof(responseBody),
-                   "nezname cislice displeje - fw v1.17\n"
+                   "nezname cislice displeje - fw v1.18\n"
                    "celkem zachyceno: %lu\n", (unsigned long)unkLog.total);
   if (unkLog.total) {
     const int8_t g = guessDigitFromSegments(unkLog.lastPattern);
@@ -2128,7 +2138,7 @@ void handleDigitScan() {
 
 void sendIconScan() {
   int n = snprintf(responseBody, sizeof(responseBody),
-                   "icon-scan ikon displeje (hledame V-nahoru/V-dolu pri prepeti/podpeti) - fw v1.17\n"
+                   "icon-scan ikon displeje (hledame V-nahoru/V-dolu pri prepeti/podpeti) - fw v1.18\n"
                    "celkem vzorku: %lu | normalni pasmo vstupu 207-253 V\n"
                    "mem[6]=mode, mem[8]=ikony; porovnej hodnoty pri prepeti/podpeti s normalem.\n",
                    (unsigned long)iconLog.total);
@@ -2239,7 +2249,9 @@ void setup() {
   loadSettings();
   setupWifiAndWeb();
   configTime(0, 0, settings.ntpServer, "time.google.com");   // NTP (UTC) pro časové značky událostí
-  logEvent("Start zařízení");
+  char startMsg[28];
+  snprintf(startMsg, sizeof(startMsg), "Start (%s)", resetReasonStr(bootResetReason));  // ať vidíme brownout/paniku/wdt
+  logEvent(startMsg);
   minFreeHeapBoot = ESP.getFreeHeap();
 }
 
