@@ -85,11 +85,12 @@ děliči.
 - **Diagnostika běhu** — důvod posledního restartu, uptime, heap, fragmentace, TX výkon,
   takt CPU (kvůli ladění výpadků bez sériáku).
 - **Log událostí** — kruhový log (výpadky sítě, baterie, alarmy) s NTP časem, `/api/events` i ve webu.
-- **WiFi dohled** — aktivní reconnect; když se WiFi nepřipojí (do 15 s po startu nebo po 5 min výpadku),
+- **WiFi dohled** — aktivní reconnect; když se WiFi nepřipojí (do 15 s po startu nebo po 1 min výpadku),
   nahodí se **záchranný hotspot** (`MHpower-XXXX`, WPA2 heslo `mhpower-setup`, web na `http://192.168.4.1`),
-  přes který se opraví špatně zadaná WiFi; po obnově spojení se hotspot sám vypne. **Task watchdog** proti zaseknutí.
+  přes který se opraví špatně zadaná WiFi; po obnově spojení se hotspot sám vypne. **Task watchdog** proti zaseknutí
+  (a po 10 min bez spojení a bez klienta na hotspotu tvrdý reboot jako poslední pojistka).
 - **mDNS** — dostupné na `http://<název>.local` bez znalosti IP.
-- **Úsporný režim** — snížený WiFi výkon, WiFi modem‑sleep, CPU 160 MHz, vypnutý Bluetooth,
+- **Úsporný režim** — **nastavitelný** WiFi výkon (výchozí 5 dBm), WiFi modem‑sleep, CPU 160 MHz, vypnutý Bluetooth,
   throttle snímání (nesnímá naplno pořád).
 
 ---
@@ -178,7 +179,7 @@ Vedle správce (`admin`) je ve firmwaru napevno účet **`guest` / `guest`** pro
 - `/` — **monitor** (dlaždice, auto‑refresh přes `/api/status`).
 - `/settings` — **systém** (jen správce): pojmenování, **přístup** (web login správce, SNMP community,
   **NTP server**), **WiFi v samostatné sekci** (SSID + heslo — změna se projeví **až po restartu**
-  zařízení), typ zdroje (14 modelů MPU 300–5000 W, napětí baterie 12/24/48 V se nastaví automaticky),
+  zařízení — a **vysílací výkon**, který se naopak projeví **ihned**), typ zdroje (14 modelů MPU 300–5000 W, napětí baterie 12/24/48 V se nastaví automaticky),
   kapacita a datum instalace baterie, minimální výdrž, práh kondice; sekce **Rozhraní (API)**, OTA a restart.
 
 **Přihlášení (HTTP Basic auth) — dvě úrovně:**
@@ -289,9 +290,10 @@ Klíčové je pole **`reset:`** (z `esp_reset_reason()`):
 `běh` (uptime) odliší restart (skočí na 0) od pouhého výpadku WiFi (uptime běží dál).
 `minFreeHeap` a `maxAllocHeap` odhalí únik paměti / fragmentaci.
 
-**Samoléčení:** WiFi se aktivně hlídá — po 15 s bez spojení se zkusí reconnect, po 5 min bez
-WiFi přijde tvrdý restart. **Task watchdog** (15 s) provede čistý reboot, kdyby se smyčka
-zasekla. Přehled posledních událostí (výpadky sítě, běhy na baterii, alarmy) je v sekci
+**Samoléčení:** WiFi se aktivně hlídá — po 15 s bez spojení se zkusí reconnect, po 1 min bez
+WiFi naskočí **záchranný hotspot** (reconnect běží dál na pozadí), a po 10 min bez spojení
+a bez klienta na hotspotu přijde tvrdý restart. **Task watchdog** (15 s) provede čistý reboot,
+kdyby se smyčka zasekla. Přehled posledních událostí (výpadky sítě, běhy na baterii, alarmy) je v sekci
 **Poslední události** na monitoru a strojově na `/api/events` (s NTP časem, pokud je synchronizovaný).
 
 ---
@@ -300,8 +302,8 @@ zasekla. Přehled posledních událostí (výpadky sítě, běhy na baterii, ala
 
 Nakonfigurováno v kódu:
 
-- **WiFi TX výkon** snížen na `WIFI_POWER_5dBm` (konstanta `WIFI_TX_POWER` nahoře v souboru) —
-  AP bývá hned u ESP, takže to neovlivní dosah, ale sníží proudové špičky i odběr.
+- **WiFi TX výkon** výchozí 5 dBm (**nastavitelný ve webu**, sekce Wi-Fi — `settings.wifiTxQdbm`) —
+  AP bývá hned u ESP, takže nízký výkon neovlivní dosah, ale sníží proudové špičky i odběr.
 - **WiFi modem‑sleep** (`WIFI_PS_MIN_MODEM`) — rádio spí mezi beacony.
 - **CPU 160 MHz** místo 240 MHz (`setCpuFrequencyMhz(160)`).
 - **Bluetooth vypnutý** (`btStop()`).
@@ -330,7 +332,7 @@ tools/captures/            ukázkové záznamy sběrnice (.sr) + vysvětlení
 Jak projekt vznikal — reverse engineering displeje logickým analyzátorem, tři pokusy o hardware
 (Wemos → ATmega2560 → ESP32), odvození mapy displeje, boj se čtením sběrnice na ESP32 a finální
 odrušení Schmittovým invertorem — je sepsáno v [`docs/HISTORIE.md`](docs/HISTORIE.md).
-Obsahuje i přehled milníků verzí v1.0–v1.18.
+Obsahuje i přehled milníků verzí v1.0–v1.19.
 
 ---
 

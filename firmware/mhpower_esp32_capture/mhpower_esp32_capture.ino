@@ -60,6 +60,7 @@ struct AppSettings {
   char deviceName[33] = "MHpower";
   char wifiSsid[33] = "WIFI_SSID";       // !!! nastav před prvním flashem (nebo později ve webu)
   char wifiPass[65] = "WIFI_PASSWORD";   // !!! nastav před prvním flashem
+  int8_t wifiTxQdbm = 20;                // vysílací výkon WiFi v ¼ dBm (20 = 5 dBm); nastavitelné ve webu
   char webUser[17] = "admin";
   char webPass[33] = "changeme";         // !!! změň přihlašovací heslo do webu
   uint16_t sourceWatts = 500;
@@ -74,6 +75,17 @@ struct AppSettings {
 };
 
 AppSettings settings;
+
+// Volitelný vysílací výkon WiFi (hodnota = ¼ dBm = wifi_power_t). AP bývá hned u ESP -> nižší
+// výkon = menší proudové špičky (brownout) i odběr; vyšší = dosah, když je AP dál.
+struct WifiTxOpt { int8_t q; const char* label; };
+const WifiTxOpt WIFI_TX_OPTS[] = {
+  {78, "19.5 dBm (max)"}, {76, "19 dBm"}, {74, "18.5 dBm"}, {68, "17 dBm"}, {60, "15 dBm"},
+  {52, "13 dBm"}, {44, "11 dBm"}, {34, "8.5 dBm"}, {28, "7 dBm"}, {20, "5 dBm (výchozí)"}, {8, "2 dBm (min)"}
+};
+const uint8_t WIFI_TX_OPTS_N = sizeof(WIFI_TX_OPTS) / sizeof(WIFI_TX_OPTS[0]);
+bool isValidTxQdbm(int8_t q) { for (uint8_t i = 0; i < WIFI_TX_OPTS_N; i++) if (WIFI_TX_OPTS[i].q == q) return true; return false; }
+wifi_power_t currentTxPower() { return (wifi_power_t)settings.wifiTxQdbm; }
 
 // modely MPU a jejich napětí baterie (z manuálu): ≤800W=12V, ≤2500W=24V, jinak 48V
 // (potvrzeno tabulkou výdrže — 12V banka utáhne zátěž do ~700W, 24V do ~1800W, 48V výš)
@@ -351,6 +363,8 @@ void loadSettings() {
   settings.batteryInstallDate[sizeof(settings.batteryInstallDate) - 1] = 0;
   settings.healthWarnPercent = prefs.getUChar("health", settings.healthWarnPercent);
   settings.minRuntimeMinutes = prefs.getUShort("minRun", settings.minRuntimeMinutes);
+  settings.wifiTxQdbm = prefs.getChar("wifiTx", settings.wifiTxQdbm);
+  if (!isValidTxQdbm(settings.wifiTxQdbm)) settings.wifiTxQdbm = 20;   // fallback na 5 dBm
   if (prefs.getBytesLength("whBar") == sizeof(learnedWhPerBar)) {
     prefs.getBytes("whBar", learnedWhPerBar, sizeof(learnedWhPerBar));
   }
@@ -394,6 +408,7 @@ void saveSettings() {
   prefs.putString("batDate", settings.batteryInstallDate);
   prefs.putUChar("health", settings.healthWarnPercent);
   prefs.putUShort("minRun", settings.minRuntimeMinutes);
+  prefs.putChar("wifiTx", settings.wifiTxQdbm);
   prefs.end();
 }
 
@@ -1209,7 +1224,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     <div class="status" id="pills"></div>
     <h2 class="label" style="margin:18px 0 8px;font-size:14px">Poslední události</h2>
     <div id="events" class="small"></div>
-    <div class="footer">Pavel Vlcek v1.18 hkfree.org</div>
+    <div class="footer">Pavel Vlcek v1.19 hkfree.org</div>
   </main>
   <script>
     function val(v){return v===null||v===undefined||v<0?'-':v}
@@ -1409,6 +1424,13 @@ void handleSettings() {
         settings.wifiPass[sizeof(settings.wifiPass) - 1] = 0;
       }
     }
+    if (server.hasArg("wifiTx")) {
+      const int8_t q = (int8_t)server.arg("wifiTx").toInt();
+      if (isValidTxQdbm(q)) {
+        settings.wifiTxQdbm = q;
+        WiFi.setTxPower(currentTxPower());   // výkon lze měnit za běhu -> aplikovat hned (bez restartu)
+      }
+    }
     if (server.hasArg("snmp")) {
       String v = server.arg("snmp");
       v.trim();
@@ -1462,7 +1484,7 @@ void handleSettings() {
   }
 
   String html;
-  html.reserve(9200);
+  html.reserve(10000);
   html += F("<!doctype html><html lang='cs'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>");
   html += F("<title>MHpower systém</title><style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#101214;color:#eef3f7;font-family:system-ui,-apple-system,Segoe UI,sans-serif}header{padding:14px 18px;border-bottom:1px solid #2a3036}main{padding:18px;max-width:1080px;margin:0 auto}h1{font-size:19px;margin:0}a{color:#9dccff}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.field,.panel{background:#181c20;border:1px solid #2a3036;border-radius:8px;padding:12px;min-width:0}label{display:block;color:#b7c9d8;font-size:13px;margin-bottom:7px}input,select{width:100%;background:#101418;color:#eef3f7;border:1px solid #34404a;border-radius:6px;padding:10px;font-size:15px}button{border:0;border-radius:7px;padding:10px 14px;font-size:15px;font-weight:700;background:#2d8cff;color:white;margin:14px 8px 0 0}.restart{background:#8f1f1f}.note{color:#9ba6b0;margin-top:12px}.sectionTitle{margin:22px 0 10px;font-size:16px}.footer{margin-top:18px;border-top:1px solid #2a3036;padding:10px 0;color:#8f9aa4;font-size:13px;text-align:center}@media(max-width:860px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:520px){.grid{grid-template-columns:1fr}}</style></head><body>");
   html += F("<header><h1>Monitoring zdroje MHpower ");
@@ -1495,7 +1517,19 @@ void handleSettings() {
   html += F("<div class='field'><label>Wi-Fi SSID</label><input name='ssid' maxlength='32' value='");
   html += escHtml(settings.wifiSsid);
   html += F("'></div><div class='field'><label>Wi-Fi heslo</label><input name='pass' maxlength='64' type='password' placeholder='(beze změny)' value='");
-  html += F("'></div></section>");
+  html += F("'></div>");
+  html += F("<div class='field'><label>Vysílací výkon Wi-Fi (projeví se ihned)</label><select name='wifiTx'>");
+  for (uint8_t i = 0; i < WIFI_TX_OPTS_N; i++) {
+    html += F("<option value='");
+    html += WIFI_TX_OPTS[i].q;
+    html += "'";
+    if (settings.wifiTxQdbm == WIFI_TX_OPTS[i].q) html += F(" selected");
+    html += F(">");
+    html += WIFI_TX_OPTS[i].label;
+    html += F("</option>");
+  }
+  html += F("</select></div></section>");
+  html += F("<p class='note'>Vysílací výkon Wi-Fi se změní <b>hned po uložení</b> (na rozdíl od SSID/hesla). AP je obvykle hned u ESP &mdash; nízký výkon (5 dBm) snižuje proudové špičky i odběr; zvyš ho, jen když je signál slabý (SNMP idx 43 / RSSI idx 17).</p>");
   html += F("<p class='note'>Když se Wi-Fi nepřipojí (do 15 s po startu nebo po 1 min výpadku), naskočí záchranný hotspot <b>");
   html += escHtml(apSsid().c_str());
   html += F("</b> (heslo <b>");
@@ -1552,7 +1586,7 @@ void handleSettings() {
   html += F("<form method='post' action='/restart'><button class='restart' type='submit'>Restartovat ESP32</button></form></div>");
   html += F("</section>");
 
-  html += F("<div class='footer'>Pavel Vlcek v1.18 hkfree.org</div></main>");
+  html += F("<div class='footer'>Pavel Vlcek v1.19 hkfree.org</div></main>");
   html += F("<script>(function(){var l=document.getElementById('logoutLink');if(l)l.addEventListener('click',function(e){e.preventDefault();var x=new XMLHttpRequest();x.open('GET','/logout',true,'logout','logout');x.onloadend=function(){location.replace('/')};x.send();});})();</script>");
   html += F("<script>(function(){var f=document.getElementById('fwform');if(!f)return;"
             "f.addEventListener('submit',function(e){e.preventDefault();"
@@ -1962,8 +1996,7 @@ void keepSnmpUdpAlive() {
 }
 
 // AP je hned u ESP -> snížený vysílací výkon = menší proudové špičky (brownout) i odběr.
-// Možnosti: WIFI_POWER_19_5dBm (max) … 15 / 13 / 11 / 8_5 / 7 / 5 / 2 / MINUS_1dBm (min).
-const wifi_power_t WIFI_TX_POWER = WIFI_POWER_5dBm;
+// Výkon je nastavitelný ve webu (WIFI_TX_OPTS / settings.wifiTxQdbm), aplikuje se přes currentTxPower(); výchozí 5 dBm.
 
 void onWifiEvent(WiFiEvent_t event) {
   switch (event) {
@@ -2003,7 +2036,7 @@ void startApFallback() {
   if (apFallbackActive) return;
   WiFi.mode(WIFI_AP_STA);
   const bool ok = WiFi.softAP(apSsid().c_str(), AP_FALLBACK_PASS);
-  WiFi.setTxPower(WIFI_TX_POWER);
+  WiFi.setTxPower(currentTxPower());
   if (!ok) {   // AP se nenahodil (zaseknutý driver po výpadku) -> NEnastavovat active, zkusit příště znovu
     Serial.println("[WiFi] softAP selhal, zkusim znovu");
     return;
@@ -2019,7 +2052,7 @@ void stopApFallback() {
   if (!apFallbackActive) return;
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);
-  WiFi.setTxPower(WIFI_TX_POWER);
+  WiFi.setTxPower(currentTxPower());
   apFallbackActive = false;
   Serial.println("[WiFi] hotspot vypnut (STA obnovena)");
   logEvent("Hotspot vypnut");
@@ -2100,7 +2133,7 @@ void sendDigitScan() {
   const uint8_t col = unkLog.lastPos % 3;   // 0=stovky 1=desitky 2=jednotky
   const char* colName = col == 0 ? "stovky" : (col == 1 ? "desitky" : "jednotky");
   int n = snprintf(responseBody, sizeof(responseBody),
-                   "nezname cislice displeje - fw v1.18\n"
+                   "nezname cislice displeje - fw v1.19\n"
                    "celkem zachyceno: %lu\n", (unsigned long)unkLog.total);
   if (unkLog.total) {
     const int8_t g = guessDigitFromSegments(unkLog.lastPattern);
@@ -2138,7 +2171,7 @@ void handleDigitScan() {
 
 void sendIconScan() {
   int n = snprintf(responseBody, sizeof(responseBody),
-                   "icon-scan ikon displeje (hledame V-nahoru/V-dolu pri prepeti/podpeti) - fw v1.18\n"
+                   "icon-scan ikon displeje (hledame V-nahoru/V-dolu pri prepeti/podpeti) - fw v1.19\n"
                    "celkem vzorku: %lu | normalni pasmo vstupu 207-253 V\n"
                    "mem[6]=mode, mem[8]=ikony; porovnej hodnoty pri prepeti/podpeti s normalem.\n",
                    (unsigned long)iconLog.total);
@@ -2193,10 +2226,10 @@ void setupWifiAndWeb() {
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(deviceHostname().c_str());
   WiFi.setSleep(WIFI_PS_MIN_MODEM);        // modem-sleep: rádio spí mezi beacony = nižší odběr
-  WiFi.setTxPower(WIFI_TX_POWER);          // snížit hned po nastavení módu
+  WiFi.setTxPower(currentTxPower());          // snížit hned po nastavení módu
   WiFi.setAutoReconnect(true);
   WiFi.begin(settings.wifiSsid, settings.wifiPass);
-  WiFi.setTxPower(WIFI_TX_POWER);          // a znovu po begin (některé verze ho resetují)
+  WiFi.setTxPower(currentTxPower());          // a znovu po begin (některé verze ho resetují)
 
   const uint32_t started = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - started < 15000) {
