@@ -20,6 +20,7 @@
 #include <soc/gpio_struct.h>
 #include <esp_system.h>
 #include <esp_task_wdt.h>
+#include <esp_timer.h>
 #include <ESPmDNS.h>
 #include <time.h>
 #include <math.h>
@@ -214,6 +215,11 @@ uint8_t pendingAlarmCount = 0;
 bool stableOverload = false;
 bool pendingOverload = false;
 uint8_t pendingOverloadCount = 0;
+// přehřátí (blank displej + ikonový bajt) dostává stejný debounce: jeden zkažený "blank"
+// rámec se správným ikonovým bajtem by jinak na 1 rámec zapnul overheat (a s ním alarm)
+bool stableOverheat = false;
+bool pendingOverheat = false;
+uint8_t pendingOverheatCount = 0;
 
 uint8_t samples[CAPTURE_SAMPLES];
 bool batterySessionActive = false;
@@ -266,10 +272,14 @@ uint32_t nowEpoch() {
   time_t t = time(nullptr);
   return t > 1700000000UL ? (uint32_t)t : 0;   // > 2023 => NTP synchronizováno
 }
+// uptime z 64bit časovače: millis()/1000 přeteče po 49,7 dnech (web i SNMP by skočily na 0)
+uint32_t uptimeSec() {
+  return (uint32_t)(esp_timer_get_time() / 1000000ULL);
+}
 void logEvent(const char* msg) {
   LogEvent &e = eventLog[eventHead];
   e.epoch = nowEpoch();
-  e.uptime = millis() / 1000UL;
+  e.uptime = uptimeSec();
   strncpy(e.msg, msg, sizeof(e.msg) - 1);
   e.msg[sizeof(e.msg) - 1] = 0;
   eventHead = (eventHead + 1) % EVENT_LOG_SIZE;
@@ -495,7 +505,12 @@ float assumedDrainWattsForEstimate() {
 float usableBatteryWhAtDrain(float drainW) {
   const float wh = nominalUsableBatteryWh();
   if (drainW <= 1.0f) return wh;
-  const float vbatt = state.batteryVoltageEstimate > 5.0f ? state.batteryVoltageEstimate : 12.2f;
+  // fallback napětí škálovat na systémové napětí banky: odhad z dílků existuje jen na baterii,
+  // na síti (projekce výdrže) by pevných 12,2 V u 24/48V banky nadsadilo proud 2-4x -> zbytečně
+  // přísný Peukert a pesimistický runtimeProjectedSec
+  const float vbatt = state.batteryVoltageEstimate > 5.0f
+      ? state.batteryVoltageEstimate
+      : 12.2f * (settings.batterySystemVoltage / 12.0f);
   const float I = drainW / vbatt;
   const float Iref = settings.batteryAh / PEUKERT_REF_HOURS;
   if (Iref <= 0.0f || I <= Iref) return wh;
@@ -640,7 +655,7 @@ void registerUnknownPattern(uint8_t val, uint8_t pos, const uint8_t* mem) {
   unkLog.lastPos = pos;
   memcpy(unkLog.lastCtx, mem, 6);
   unkLog.lastEpoch = nowEpoch();
-  unkLog.lastUptime = millis() / 1000UL;
+  unkLog.lastUptime = uptimeSec();
   for (uint8_t i = 0; i < unkLog.distinct; i++) {
     if (unkLog.pattern[i] == val) { if (unkLog.count[i] < 0xFFFF) unkLog.count[i]++; return; }
   }
@@ -700,7 +715,9 @@ void updateDecodedState(const uint8_t* mem, uint8_t brightness) {
     return;
   }
 
-  const bool rawOnBattery = candidateOverheat ? false : ((mem[6] & 0x40) != 0);
+  const bool stableOh = confirmFlag(candidateOverheat, stableOverheat, pendingOverheat,
+                                    pendingOverheatCount, SOURCE_CONFIRM_FRAMES);
+  const bool rawOnBattery = stableOh ? false : ((mem[6] & 0x40) != 0);
   if (!hasStableSource) {
     stableOnBattery = rawOnBattery;
     pendingOnBattery = rawOnBattery;
@@ -731,7 +748,7 @@ void updateDecodedState(const uint8_t* mem, uint8_t brightness) {
   state.inputVoltage = candidateInput;
   state.outputVoltage = candidateOutput;
   state.displayBlank = candidateDisplayBlank;
-  state.overheat = candidateOverheat;
+  state.overheat = stableOh;
 
   const uint8_t mode = state.mem[6];
   state.onBattery = state.overheat ? false : stableOnBattery;
@@ -1027,12 +1044,13 @@ bool findFrame(const uint8_t* data, uint8_t dataLen, uint8_t* mem, uint8_t* brig
   return false;
 }
 
-bool tryDecodeVariant(uint8_t edge, int8_t offset, uint8_t inv, uint8_t order, uint8_t phase,
-                      uint8_t* mem, uint8_t* brightness, uint8_t* dataOut, uint8_t* dataLenOut,
-                      uint8_t* bitLenOut, int* scoreOut) {
-  uint8_t bits[256];
+// jádro dekódu nad UŽ vytaženými bity: složí bajty (order/phase), najde rámec a oboduje ho.
+// extractBits (průchod 18k vzorků) na order/phase nezávisí, proto je vytažené ven — plné
+// hledání ho tak volá 44x (hrana×offset×inverze) místo 704x -> ~16x rychlejší neúspěšný dekód.
+bool tryDecodeFromBits(const uint8_t* bits, uint8_t bitLen, uint8_t order, uint8_t phase,
+                       uint8_t* mem, uint8_t* brightness, uint8_t* dataOut, uint8_t* dataLenOut,
+                       int* scoreOut) {
   uint8_t data[48];
-  const uint8_t bitLen = extractBits(edge == 0, offset, inv != 0, bits, sizeof(bits));
   const uint8_t dataLen = packBits(bits, bitLen, order == 0, phase, data, sizeof(data));
   if (!findFrame(data, dataLen, mem, brightness)) return false;
 
@@ -1045,10 +1063,18 @@ bool tryDecodeVariant(uint8_t edge, int8_t offset, uint8_t inv, uint8_t order, u
   if (loadLevelFrom07(mem[7]) != 255) score += 200;
 
   *dataLenOut = dataLen;
-  *bitLenOut = bitLen;
   *scoreOut = score;
   memcpy(dataOut, data, dataLen);
   return true;
+}
+
+bool tryDecodeVariant(uint8_t edge, int8_t offset, uint8_t inv, uint8_t order, uint8_t phase,
+                      uint8_t* mem, uint8_t* brightness, uint8_t* dataOut, uint8_t* dataLenOut,
+                      uint8_t* bitLenOut, int* scoreOut) {
+  uint8_t bits[256];
+  const uint8_t bitLen = extractBits(edge == 0, offset, inv != 0, bits, sizeof(bits));
+  *bitLenOut = bitLen;
+  return tryDecodeFromBits(bits, bitLen, order, phase, mem, brightness, dataOut, dataLenOut, scoreOut);
 }
 
 void acceptDecodedFrame(const uint8_t* mem, uint8_t brightness, const uint8_t* data, uint8_t dataLen,
@@ -1098,18 +1124,23 @@ bool decodeCapture() {
   }
 
   uint8_t data[48];
+  uint8_t bits[256];
 
   for (uint8_t edge = 0; edge < 2; edge++) {
+#if USE_TASK_WDT
+    esp_task_wdt_reset();   // plné hledání je nejdelší souvislá práce ve smyčce -> pojistka
+#endif
     for (int8_t offset = -3; offset <= 7; offset++) {
       for (uint8_t inv = 0; inv < 2; inv++) {
+        const uint8_t bitLen = extractBits(edge == 0, offset, inv != 0, bits, sizeof(bits));
+        if (bitLen < 96) continue;   // rámec má min. 12 bajtů (0xC0 + 10 dat + jas) = 96 bitů; míň nemá smysl skládat
         for (uint8_t order = 0; order < 2; order++) {
           for (uint8_t phase = 0; phase < 8; phase++) {
             uint8_t mem[10];
             uint8_t brightness = 0;
             uint8_t dataLen = 0;
-            uint8_t bitLen = 0;
             int score = 0;
-            if (tryDecodeVariant(edge, offset, inv, order, phase, mem, &brightness, data, &dataLen, &bitLen, &score)) {
+            if (tryDecodeFromBits(bits, bitLen, order, phase, mem, &brightness, data, &dataLen, &score)) {
               if (score > bestScore) {
                 bestScore = score;
                 memcpy(bestMem, mem, 10);
@@ -1224,7 +1255,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     <div class="status" id="pills"></div>
     <h2 class="label" style="margin:18px 0 8px;font-size:14px">Poslední události</h2>
     <div id="events" class="small"></div>
-    <div class="footer">Pavel Vlcek v1.19 hkfree.org</div>
+    <div class="footer">Pavel Vlcek v1.20 hkfree.org</div>
   </main>
   <script>
     function val(v){return v===null||v===undefined||v<0?'-':v}
@@ -1247,7 +1278,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       if(j.onBattery){runtimeNow.textContent=fmtTime(j.onBatteryRuntimeSec);runtimeText.textContent='zbývá '+fmtTime(j.runtimeRemainingEstimateSec)+' / celkem '+fmtTime(j.runtimeTotalEstimateSec)+' / posledně '+fmtTime(j.lastBatteryRunSec);}else{runtimeNow.textContent=(j.runtimeProjectedSec>0?'~'+fmtTime(j.runtimeProjectedSec):'-');runtimeText.textContent=(j.runtimeProjectedSec>0?('odhad výdrže při výpadku ('+(j.loadWattsEstimate>0?'zátěž '+val(j.loadWattsEstimate)+' W':'orientačně, min. zátěž')+')'):'odhad výdrže zatím nelze určit')+' / posledně '+fmtTime(j.lastBatteryRunSec);}
       const batAh=(j.settings&&j.settings.batteryAh!==undefined)?Number(j.settings.batteryAh).toFixed(1):'-';
       const batHealth=j.batteryHealthPercent!==undefined?j.batteryHealthPercent:'-';
-      batteryText.textContent=(j.overheat?'teplotní alarm':(j.criticalBattery?'kritický stav před vypnutím':(j.charging?'nabíjení':((j.batteryState||'')+(j.batteryVoltageEstimate!==null&&j.batteryVoltageEstimate!==undefined?' / '+Number(j.batteryVoltageEstimate).toFixed(1)+' V':'')))))+' / '+batAh+' Ah / zdraví '+batHealth+' %';loadText.textContent=j.loadState||'';
+      batteryText.textContent=(j.overheat?'teplotní alarm':(j.criticalBattery?'kritický stav před vypnutím':(j.charging?'nabíjení':((j.batteryState||'')+(j.batteryVoltageEstimate>0?' / '+Number(j.batteryVoltageEstimate).toFixed(1)+' V':'')))))+' / '+batAh+' Ah / zdraví '+batHealth+' %';loadText.textContent=j.loadState||'';
       rssi.textContent=signed(j.rssi);ip.innerHTML='IP '+(j.ip||'-')+'<br>maska '+(j.mask||'-')+'<br>brána '+(j.gw||'-')+'<br>DNS '+(j.dns||'-');diag.textContent='rámců '+val(j.frames)+' / heap '+val(j.freeHeap)+' (min '+val(j.minFreeHeap)+', blok '+val(j.maxAllocHeap)+') / err '+val(j.errors)+' / filtr '+val(j.filtered)+' / cap '+val(j.captureOk)+' / tout '+val(j.captureTimeouts)+' | běh '+fmtTime(j.uptimeSec)+' / reset: '+(j.resetReason||'?')+' / TX '+(j.txPowerDbm!==undefined?Number(j.txPowerDbm).toFixed(1)+' dBm':'?')+' / CPU '+val(j.cpuMhz)+' MHz / dílky '+val(j.barsLearned)+'/5'+(j.learnedUsableWh?' ('+val(j.learnedUsableWh)+' Wh)':'');
       let ps='';ps+=pill(j.mainsPresent?'Síť přítomna':'Bez sítě',j.mainsPresent?'good':'bad');if(j.onBattery)ps+=pill('BĚH NA BATERII','bad');if(j.overheat)ps+=pill('PŘEHŘÁTÍ','bad');if(j.criticalBattery)ps+=pill('BATERIE 0 %','bad');if(j.charging)ps+=pill('Nabíjení','good');if(j.batteryFull)ps+=pill('Baterie plná','good');if(j.lowBattery)ps+=pill('Nízká baterie','bad');if(j.overload)ps+=pill('Přetížení','bad');if(j.overVoltage)ps+=pill('PŘEPĚTÍ V↑','warn');if(j.underVoltage)ps+=pill('PODPĚTÍ V↓','warn');if(j.alarm&&!j.overheat)ps+=pill('Alarm','bad');if(j.healthWarning)ps+=pill('Kondice baterie nízká','warn');if(j.runtimeWarning)ps+=pill('Výdrž pod limitem','warn');pills.innerHTML=ps;renderEvents()}
     document.getElementById('logoutLink').addEventListener('click',function(e){e.preventDefault();var x=new XMLHttpRequest();x.open('GET','/logout',true,'logout','logout');x.onloadend=function(){location.replace('/')};x.send();});
@@ -1331,7 +1362,7 @@ void sendStatusJson(bool isAdmin) {
     WiFi.gatewayIP().toString().c_str(),
     WiFi.dnsIP().toString().c_str(),
     resetReasonStr(bootResetReason),
-    (unsigned long)(millis() / 1000UL),
+    (unsigned long)uptimeSec(),
     ESP.getMinFreeHeap(),
     ESP.getMaxAllocHeap(),
     (double)WiFi.getTxPower() / 4.0,
@@ -1450,7 +1481,12 @@ void handleSettings() {
     }
     if (server.hasArg("watts")) {
       const uint16_t w = (uint16_t)server.arg("watts").toInt();
-      if (isValidWatts(w)) { settings.sourceWatts = w; settings.batterySystemVoltage = batteryVoltageForWatts(w); }
+      if (isValidWatts(w)) {
+        const uint8_t newV = batteryVoltageForWatts(w);
+        if (newV != settings.batterySystemVoltage) resetLearnedBars();   // jiná banka -> naučené Wh/dílek neplatí
+        settings.sourceWatts = w;
+        settings.batterySystemVoltage = newV;
+      }
     }
     if (server.hasArg("batAh")) {
       const float ah = server.arg("batAh").toFloat();
@@ -1459,6 +1495,8 @@ void handleSettings() {
     if (server.hasArg("batDate")) {
       String v = server.arg("batDate");
       v.trim();
+      v.replace("\"", "");   // hodnota jde nesanitizovaně do JSON /api/status -> uvozovka by ho rozbila
+      v.replace("\\", "");
       if (v.length() > 0 && v.length() < sizeof(settings.batteryInstallDate)) {
         strncpy(settings.batteryInstallDate, v.c_str(), sizeof(settings.batteryInstallDate) - 1);
         settings.batteryInstallDate[sizeof(settings.batteryInstallDate) - 1] = 0;
@@ -1586,7 +1624,7 @@ void handleSettings() {
   html += F("<form method='post' action='/restart'><button class='restart' type='submit'>Restartovat ESP32</button></form></div>");
   html += F("</section>");
 
-  html += F("<div class='footer'>Pavel Vlcek v1.19 hkfree.org</div></main>");
+  html += F("<div class='footer'>Pavel Vlcek v1.20 hkfree.org</div></main>");
   html += F("<script>(function(){var l=document.getElementById('logoutLink');if(l)l.addEventListener('click',function(e){e.preventDefault();var x=new XMLHttpRequest();x.open('GET','/logout',true,'logout','logout');x.onloadend=function(){location.replace('/')};x.send();});})();</script>");
   html += F("<script>(function(){var f=document.getElementById('fwform');if(!f)return;"
             "f.addEventListener('submit',function(e){e.preventDefault();"
@@ -1839,7 +1877,7 @@ bool getSnmpValue(uint8_t idx, SnmpValue& value) {
     case 36: value.integer = age == 0xFFFFFFFFUL ? -1 : (int32_t)age; break;
     case 37: value.integer = state.healthWarning ? 1 : 0; break;
     case 38: value.integer = state.runtimeWarning ? 1 : 0; break;
-    case 39: value.integer = (int32_t)(millis() / 1000UL); break;          // uptime [s]
+    case 39: value.integer = (int32_t)uptimeSec(); break;                   // uptime [s] (64bit zdroj, nepřeteče po 49,7 dnech)
     case 40: value.integer = (int32_t)ESP.getMinFreeHeap(); break;          // min volný heap [B]
     case 41: value.integer = (int32_t)ESP.getMaxAllocHeap(); break;         // největší volný blok [B]
     case 42: value.type = 0x04; strncpy(value.text, resetReasonStr(bootResetReason), sizeof(value.text) - 1); break;  // důvod restartu
@@ -2133,7 +2171,7 @@ void sendDigitScan() {
   const uint8_t col = unkLog.lastPos % 3;   // 0=stovky 1=desitky 2=jednotky
   const char* colName = col == 0 ? "stovky" : (col == 1 ? "desitky" : "jednotky");
   int n = snprintf(responseBody, sizeof(responseBody),
-                   "nezname cislice displeje - fw v1.19\n"
+                   "nezname cislice displeje - fw v1.20\n"
                    "celkem zachyceno: %lu\n", (unsigned long)unkLog.total);
   if (unkLog.total) {
     const int8_t g = guessDigitFromSegments(unkLog.lastPattern);
@@ -2171,7 +2209,7 @@ void handleDigitScan() {
 
 void sendIconScan() {
   int n = snprintf(responseBody, sizeof(responseBody),
-                   "icon-scan ikon displeje (hledame V-nahoru/V-dolu pri prepeti/podpeti) - fw v1.19\n"
+                   "icon-scan ikon displeje (hledame V-nahoru/V-dolu pri prepeti/podpeti) - fw v1.20\n"
                    "celkem vzorku: %lu | normalni pasmo vstupu 207-253 V\n"
                    "mem[6]=mode, mem[8]=ikony; porovnej hodnoty pri prepeti/podpeti s normalem.\n",
                    (unsigned long)iconLog.total);
@@ -2233,6 +2271,10 @@ void setupWifiAndWeb() {
 
   const uint32_t started = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - started < 15000) {
+#if USE_TASK_WDT
+    esp_task_wdt_reset();   // čekání trvá až 15 s = celý WDT timeout; bez krmení by boot bez WiFi
+                            // skončil task-watchdog panikou DŘÍV, než naskočí záchranný hotspot -> boot smyčka
+#endif
     delay(100);
   }
 
