@@ -11,7 +11,7 @@ add name=WAN
 add name=LAN
 /interface wireless security-profiles
 set [ find default=yes ] authentication-types=wpa2-psk mode=dynamic-keys \
-    supplicant-identity=MikroTik
+    supplicant-identity=MikroTik wpa2-pre-shared-key=ZMENIT
 /ip pool
 add name=dhcp_pool0 ranges=192.168.1.2-192.168.1.254
 /ip dhcp-server

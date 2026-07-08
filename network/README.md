@@ -51,7 +51,9 @@ jako kdyby byl ESP přímo v síti.
 
 - **Admin je bez hesla** — nastavit `/user set admin password="…"` (zatím chrání
   jen firewall, který pouští správu pouze z `10.107.0.0/16`).
-- WPA2 klíč WiFi není v exportu (skrytý) — nastavit/ověřit ručně; musí sedět s ESP.
+- WPA2 klíč WiFi je v `.rsc` jen jako placeholder `ZMENIT` (reálné heslo do gitu
+  nepatří) — po importu nastavit ručně a musí sedět s ESP:
+  `/interface wireless security-profiles set [find default=yes] wpa2-pre-shared-key="…"`
 - Pokud dst‑nat pravidla po importu ukážou flag `I` (invalid), je to jen
   re‑evaluace po dávkovém přidání — `/ip firewall nat disable [find chain=dstnat]`
   a hned `enable` to spraví.
