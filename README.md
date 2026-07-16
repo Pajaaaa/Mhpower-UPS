@@ -80,7 +80,7 @@ děliči.
   **24 V / 48 V** baterií a **14 modelů MPU** (300–5000 W, napětí baterie se zvolí automaticky).
 - **Odhad výdrže** s učením energie na jednotlivé dílky baterie (viz níže) — a **proaktivně i na síti**
   („kdyby teď vypadl proud, vydrží ~X“).
-- **SNMP v1** (UDP/161) — 49 OID pro integraci do monitoringu (Zabbix, LibreNMS, …).
+- **SNMP v1** (UDP/161) — 50 OID pro integraci do monitoringu (Zabbix, LibreNMS, …).
 - **OTA aktualizace** firmwaru přes web (s progress barem).
 - **Diagnostika běhu** — důvod posledního restartu, uptime, heap, fragmentace, TX výkon,
   takt CPU (kvůli ladění výpadků bez sériáku).
@@ -270,6 +270,8 @@ Identifikace desky: **45** (str) HW ID = MAC desky (`AA:BB:CC:DD:EE:FF`) — trv
 
 Síť a výdrž: **46** přepětí (1/0), **47** podpětí (1/0), **48** (str) stav AVR (síť v normě / V↑ / V↓),
 **49** proaktivní odhad výdrže [s] (i na síti = „kdyby teď vypadl proud“).
+
+Verze: **50** (str) verze firmwaru (od v1.21; power monitor ji zobrazuje v detailu zdroje).
 
 Příklad: `snmpwalk -v1 -c public <IP> 1.3.6.1.4.1.53864.1.1`
 

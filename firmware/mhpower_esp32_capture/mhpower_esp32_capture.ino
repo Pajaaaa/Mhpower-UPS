@@ -43,6 +43,8 @@ const uint32_t CAPTURE_INTERVAL_MS = 200;  // throttle: nesnímat naplno pořád
 const uint8_t SOURCE_CONFIRM_FRAMES = 3;
 const uint16_t SNMP_PORT = 161;
 
+const char FW_VERSION[] = "1.21";   // jediné místo s verzí: web, /api/status, SNMP idx 50, dev-skeny
+
 // --- baterie / energie ---
 const float BATTERY_NOMINAL_V = 12.0f;
 const float BATTERY_USABLE_FRACTION = 0.85f;   // podíl kapacity využitelný do vypnutí UPS
@@ -100,6 +102,13 @@ struct SnmpValue {
   int32_t integer;
   char text[48];
 };
+
+// Explicitní prototypy funkcí s uživatelskými typy v signatuře: novější arduino-cli generuje
+// automatické prototypy PŘED definice typů a překlad by spadl ('SnmpValue' has not been declared).
+// Vlastní prototyp generátor přeskočí.
+bool getSnmpValue(uint8_t idx, SnmpValue& value);
+void sendSnmpResponse(const uint8_t* requestIdTlv, int requestIdTlvLen, const char* community,
+                      const uint32_t* responseOid, uint8_t responseOidLen, const SnmpValue& value);
 
 struct DisplayState {
   uint8_t mem[10] = {0};
@@ -220,6 +229,13 @@ uint8_t pendingOverloadCount = 0;
 bool stableOverheat = false;
 bool pendingOverheat = false;
 uint8_t pendingOverheatCount = 0;
+// dílky baterie dostávají stejný debounce: jeden glitchnutý rámec s platným, ale jiným vzorem
+// by jinak zapsal falešný přechod dílku do učení Wh/dílek (EMA váha 0,3!) a resetoval
+// počítadlo energie dílku. Nečitelný vzor (255) drží poslední známou hodnotu.
+uint8_t stableBatteryBars = 255;
+uint8_t pendingBatteryBars = 255;
+uint8_t pendingBatteryBarsCount = 0;
+bool hasStableBars = false;
 
 uint8_t samples[CAPTURE_SAMPLES];
 bool batterySessionActive = false;
@@ -248,6 +264,28 @@ bool confirmFlag(bool raw, bool &stable, bool &pending, uint8_t &count, uint8_t 
     count = 0;
   }
   return stable;
+}
+
+// Debounce hodnoty dílků baterie (0..5): nová hodnota se přijme až po SOURCE_CONFIRM_FRAMES
+// shodných rámcích. Nečitelný vzor (255) hodnotu nemění — drží se poslední známá.
+uint8_t confirmBatteryBars(uint8_t candidate) {
+  if (candidate > 5) return stableBatteryBars;
+  if (!hasStableBars) {
+    stableBatteryBars = candidate;
+    hasStableBars = true;
+    pendingBatteryBarsCount = 0;
+    return stableBatteryBars;
+  }
+  if (candidate == stableBatteryBars) {
+    pendingBatteryBarsCount = 0;
+  } else if (pendingBatteryBars != candidate) {
+    pendingBatteryBars = candidate;
+    pendingBatteryBarsCount = 1;
+  } else if (pendingBatteryBarsCount < 255 && ++pendingBatteryBarsCount >= SOURCE_CONFIRM_FRAMES) {
+    stableBatteryBars = candidate;
+    pendingBatteryBarsCount = 0;
+  }
+  return stableBatteryBars;
 }
 
 // --- diagnostika běhu (kvůli ladění výpadků/restartů bez sériáku) ---
@@ -314,8 +352,12 @@ void detectEvents() {
 // index = počet dílků, který se právě vybíjí (energie spotřebovaná, než dílek zhasne)
 float learnedWhPerBar[6] = {0};
 uint16_t learnedBarSamples[6] = {0};
+// průměrný odběr [W], při kterém se dílek učil — naučené Wh v sobě nesou Peukertovu ztrátu
+// té zátěže; při predikci na jiné zátěži se Wh korigují poměrem Peukert faktorů
+float learnedBarDrainW[6] = {0};
 int8_t energyBarLevel = -1;      // dílek, který se právě sleduje (-1 = nesledováno)
 float whSinceBarEntry = 0.0f;    // Wh spotřebované od vstupu do aktuálního dílku
+uint32_t barEntryMs = 0;         // millis() vstupu do aktuálního dílku (pro průměrný odběr dílku)
 bool barEntryObserved = false;   // viděli jsme čistý vstup do aktuálního dílku?
 
 const char* resetReasonStr(esp_reset_reason_t r) {
@@ -381,8 +423,13 @@ void loadSettings() {
   if (prefs.getBytesLength("whBarN") == sizeof(learnedBarSamples)) {
     prefs.getBytes("whBarN", learnedBarSamples, sizeof(learnedBarSamples));
   }
+  // starší verze blob "whBarW" nemají -> nuly = bez Peukert korekce (graceful upgrade)
+  if (prefs.getBytesLength("whBarW") == sizeof(learnedBarDrainW)) {
+    prefs.getBytes("whBarW", learnedBarDrainW, sizeof(learnedBarDrainW));
+  }
   for (uint8_t b = 0; b < 6; b++) {
     if (!(learnedWhPerBar[b] >= 0.0f && learnedWhPerBar[b] < 100000.0f)) { learnedWhPerBar[b] = 0.0f; learnedBarSamples[b] = 0; }
+    if (!(learnedBarDrainW[b] >= 0.0f && learnedBarDrainW[b] < 10000.0f)) learnedBarDrainW[b] = 0.0f;
   }
   prefs.end();
 }
@@ -392,11 +439,12 @@ void saveLearnedBars() {
   prefs.begin("mhpower", false);
   prefs.putBytes("whBar", learnedWhPerBar, sizeof(learnedWhPerBar));
   prefs.putBytes("whBarN", learnedBarSamples, sizeof(learnedBarSamples));
+  prefs.putBytes("whBarW", learnedBarDrainW, sizeof(learnedBarDrainW));
   prefs.end();
 }
 
 void resetLearnedBars() {
-  for (uint8_t b = 0; b < 6; b++) { learnedWhPerBar[b] = 0.0f; learnedBarSamples[b] = 0; }
+  for (uint8_t b = 0; b < 6; b++) { learnedWhPerBar[b] = 0.0f; learnedBarSamples[b] = 0; learnedBarDrainW[b] = 0.0f; }
   energyBarLevel = -1;
   whSinceBarEntry = 0.0f;
   barEntryObserved = false;
@@ -485,26 +533,38 @@ float nominalUsableBatteryWh() {
   return settings.batteryAh * (BATTERY_NOMINAL_V * settings.batterySystemVoltage / 12.0f) * BATTERY_USABLE_FRACTION * settings.batteryHealthFactor;
 }
 
+// Zátěž pro energetický model: STŘED pásma dílku (dílek N pokrývá (N-1)*20..N*20 % jmenovitého
+// výkonu) — statisticky nejlepší odhad. Displej/SNMP (.12) dál ukazují horní hranici pásma
+// (loadWattsEstimate), tady jde jen o interní model. Přetížení = 100 %. -1 = zátěž neznámá.
+float modelLoadWatts() {
+  if (state.loadLevel == 255) return -1.0f;
+  if (state.loadLevel == 0) return 0.0f;
+  const float frac = state.overload ? 1.0f : ((float)state.loadLevel - 0.5f) * 0.20f;
+  return frac * (float)settings.sourceWatts;
+}
+
 // kolik reálně teče z baterie: výstupní zátěž / účinnost + vlastní spotřeba měniče
 float batteryDrainWatts() {
   if (!state.onBattery || state.outputVoltage <= 0) return 0.0f;
-  const float out = state.loadWattsEstimate > 0 ? (float)state.loadWattsEstimate : 0.0f;
+  const float modelW = modelLoadWatts();
+  const float out = modelW > 0.0f ? modelW : 0.0f;
   return out / INVERTER_EFFICIENCY + (float)INVERTER_IDLE_W;
 }
 
 // Drain jen pro ODHAD výdrže: když displej hlásí nulovou/neznámou zátěž a výstup je zapnutý,
-// předpokládej minimální zátěž 10 % jmenovitého výkonu (≈ půl dílku z pásma 0–20 %) -> orientační (horní) odhad.
+// předpokládej minimální zátěž 10 % jmenovitého výkonu (≈ střed pásma 0–20 %) -> orientační odhad.
 // NEovlivňuje účtování energie ani učení Wh/dílek (ta jdou z reálného batteryDrainWatts()).
 float assumedDrainWattsForEstimate() {
   if (state.outputVoltage <= 0) return 0.0f;
-  const float outW = state.loadWattsEstimate > 0 ? (float)state.loadWattsEstimate : settings.sourceWatts * 0.10f;
+  const float modelW = modelLoadWatts();
+  const float outW = modelW > 0.0f ? modelW : settings.sourceWatts * 0.10f;
   return outW / INVERTER_EFFICIENCY + (float)INVERTER_IDLE_W;
 }
 
-// využitelná energie po korekci na vybíjecí proud (Peukert)
-float usableBatteryWhAtDrain(float drainW) {
-  const float wh = nominalUsableBatteryWh();
-  if (drainW <= 1.0f) return wh;
+// Peukertův derating: kolik z C20 energie zbyde při daném odběru (0..1).
+// Společný základ pro prior model, korekci naučených dílků i normalizaci učení health.
+float peukertDerating(float drainW) {
+  if (drainW <= 1.0f) return 1.0f;
   // fallback napětí škálovat na systémové napětí banky: odhad z dílků existuje jen na baterii,
   // na síti (projekce výdrže) by pevných 12,2 V u 24/48V banky nadsadilo proud 2-4x -> zbytečně
   // přísný Peukert a pesimistický runtimeProjectedSec
@@ -513,8 +573,13 @@ float usableBatteryWhAtDrain(float drainW) {
       : 12.2f * (settings.batterySystemVoltage / 12.0f);
   const float I = drainW / vbatt;
   const float Iref = settings.batteryAh / PEUKERT_REF_HOURS;
-  if (Iref <= 0.0f || I <= Iref) return wh;
-  return wh * powf(Iref / I, PEUKERT_K - 1.0f);
+  if (Iref <= 0.0f || I <= Iref) return 1.0f;
+  return powf(Iref / I, PEUKERT_K - 1.0f);
+}
+
+// využitelná energie po korekci na vybíjecí proud (Peukert)
+float usableBatteryWhAtDrain(float drainW) {
+  return nominalUsableBatteryWh() * peukertDerating(drainW);
 }
 
 // ---- ukotvení výdrže na dílky baterie (lepší model) ----
@@ -550,21 +615,30 @@ float priorWhForBar(uint8_t b) {
   return delta * nominalUsableBatteryWh();
 }
 
-float whForBar(uint8_t b) {
+// energie dílku přepočtená na predikovaný odběr: naučené Wh nesou Peukertovu ztrátu zátěže,
+// při které se učily -> korekce poměrem deratingů; prior (C20) se deratuje na predikovaný odběr
+float whForBar(uint8_t b, float predictW) {
   if (b > 5) return 0.0f;
-  return learnedBarSamples[b] > 0 ? learnedWhPerBar[b] : priorWhForBar(b);
+  if (learnedBarSamples[b] > 0) {
+    float wh = learnedWhPerBar[b];
+    const float learnW = learnedBarDrainW[b];
+    if (learnW > 1.0f && predictW > 1.0f) wh *= peukertDerating(predictW) / peukertDerating(learnW);
+    return wh;
+  }
+  return priorWhForBar(b) * peukertDerating(predictW);
 }
 
-// vrátí true a naplní remainingWh/totalWh, pokud je naučeno dost dílků
-bool estimateRuntimeFromBars(float &remainingWh, float &totalWh) {
-  if (state.batteryBars > 5) return false;
+// vrátí true a naplní remainingWh/totalWh, pokud je naučeno dost dílků.
+// socBars předává volající: na baterii debouncované dílky, na síti stabilní SoC (viz animace nabíjení)
+bool estimateRuntimeFromBars(uint8_t socBars, float predictW, float &remainingWh, float &totalWh) {
+  if (socBars > 5) return false;
   if (barsLearnedCount() < 3) return false;          // jinak nech starý model
-  const uint8_t cb = state.batteryBars;
+  const uint8_t cb = socBars;
   float total = 0.0f;
-  for (uint8_t b = 0; b <= 5; b++) total += whForBar(b);
+  for (uint8_t b = 0; b <= 5; b++) total += whForBar(b, predictW);
   float lower = 0.0f;
-  for (uint8_t b = 0; b < cb; b++) lower += whForBar(b);
-  const float curWh = whForBar(cb);
+  for (uint8_t b = 0; b < cb; b++) lower += whForBar(b, predictW);
+  const float curWh = whForBar(cb, predictW);
   float remCur;
   if (barEntryObserved && energyBarLevel == (int8_t)cb) {
     remCur = curWh - whSinceBarEntry;        // víme, kolik dílku už ubylo
@@ -601,7 +675,14 @@ bool learnBatteryHealthFromCurrentSession() {
   const float nominalWh = settings.batteryAh * (BATTERY_NOMINAL_V * settings.batterySystemVoltage / 12.0f) * BATTERY_USABLE_FRACTION;
   if (nominalWh <= 1.0f || batterySessionUsedWh <= 1.0f) return false;
 
-  float learned = batterySessionUsedWh / nominalWh;
+  // usedWh v sobě nese Peukertovu ztrátu při zátěži session — bez normalizace by se Peukert
+  // započetl dvakrát (podruhé při predikci přes usableBatteryWhAtDrain) a health by vycházel
+  // tím pesimističtěji, čím větší byla zátěž učicího výboje
+  const float sessionHours = (float)(millis() - batterySessionStartMs) / 3600000.0f;
+  const float sessionAvgW = sessionHours > 0.001f ? batterySessionUsedWh / sessionHours : 0.0f;
+  const float derating = peukertDerating(sessionAvgW);
+
+  float learned = (batterySessionUsedWh / derating) / nominalWh;
   if (learned < 0.20f) learned = 0.20f;
   if (learned > 1.00f) learned = 1.00f;
   settings.batteryHealthFactor = settings.batteryHealthFactor * 0.70f + learned * 0.30f;
@@ -646,6 +727,17 @@ bool firstBatteryBarIsBlinking() {
     else return false;
   }
   return seenOff && seenOne;
+}
+
+// SoC během nabíjecí animace: animace cyklí dílky od reálného stavu baterie nahoru,
+// minimum v okně historie ~ skutečný stav. 255 = historie prázdná/nečitelná.
+uint8_t minBatteryBarsInHistory() {
+  uint8_t best = 255;
+  for (uint8_t i = 0; i < batteryHistoryCount; i++) {
+    const uint8_t b = batteryBarsFrom09(batteryHistory[i]);
+    if (b < best) best = b;
+  }
+  return best;
 }
 
 // zapiš jeden neznámý segmentový vzor do histogramu + ulož kontext
@@ -758,10 +850,14 @@ void updateDecodedState(const uint8_t* mem, uint8_t brightness) {
                                        pendingAlarmCount, SOURCE_CONFIRM_FRAMES);
   state.alarm = state.overheat || stableAlarm;
 
-  state.batteryBars = candidateBars;
   rememberBatteryPattern(state.mem[9]);
   const bool chargingAnimation = batteryPatternIsChanging();
   const bool criticalBlink = firstBatteryBarIsBlinking();
+  const uint8_t debouncedBars = confirmBatteryBars(candidateBars);
+  // Nabíjecí animace cyklí dílky -> ven (SNMP .15, odhady výdrže) dávej minimum z okna
+  // historie ~ reálný SoC, ne náhodnou fázi animace. Jinak debouncovanou hodnotu (glitch
+  // jednoho rámce nesmí dělat falešné přechody dílků).
+  state.batteryBars = (!stableOnBattery && chargingAnimation) ? minBatteryBarsInHistory() : debouncedBars;
   const bool fullPattern = state.mainsPresent && candidateBars == 5 && state.mem[9] == 0x77;
   if (!state.overheat && fullPattern && !chargingAnimation) {
     if (fullBatteryStableFrames < 10) fullBatteryStableFrames++;
@@ -859,6 +955,7 @@ void updateDecodedState(const uint8_t* mem, uint8_t brightness) {
       avgDrainW = 0.0f;
       energyBarLevel = state.batteryBars <= 5 ? (int8_t)state.batteryBars : -1;
       whSinceBarEntry = 0.0f;
+      barEntryMs = now;
       barEntryObserved = false;   // start uprostřed dílku -> jeho náplň neznáme
     }
     uint32_t dtMs = now - batteryRuntimeLastMs;
@@ -869,25 +966,36 @@ void updateDecodedState(const uint8_t* mem, uint8_t brightness) {
       const float stepWh = drainW * ((float)dtMs / 3600000.0f);
       batterySessionUsedWh += stepWh;
       whSinceBarEntry += stepWh;
-      avgDrainW = avgDrainW <= 0.0f ? drainW : (avgDrainW * 0.9f + drainW * 0.1f);
+      // časová EMA s τ ≈ 45 s: predikce nemá skákat s každým přepnutím dílku zátěže
+      // (dřívější alpha 0,1/rámec při ~5 Hz dávala τ ~2 s = prakticky okamžitou hodnotu)
+      float a = (float)dtMs / 45000.0f;
+      if (a > 1.0f) a = 1.0f;
+      avgDrainW = avgDrainW <= 0.0f ? drainW : avgDrainW + (drainW - avgDrainW) * a;
     }
     // přechod dílku: energie utracená na opouštěném dílku se naučí (EMA)
     if (state.batteryBars <= 5) {
       const int8_t cb = (int8_t)state.batteryBars;
       if (energyBarLevel < 0) {
-        energyBarLevel = cb; whSinceBarEntry = 0.0f; barEntryObserved = false;
+        energyBarLevel = cb; whSinceBarEntry = 0.0f; barEntryMs = now; barEntryObserved = false;
       } else if (cb != energyBarLevel) {
         if (cb == energyBarLevel - 1 && barEntryObserved && whSinceBarEntry > 0.5f) {
           const uint8_t lb = (uint8_t)energyBarLevel;
+          // vedle Wh si ulož i průměrný odběr, při kterém se dílek učil (pro Peukert korekci predikce)
+          const float barHours = (float)(now - barEntryMs) / 3600000.0f;
+          const float barAvgW = barHours > 0.001f ? whSinceBarEntry / barHours : 0.0f;
           learnedWhPerBar[lb] = learnedBarSamples[lb] == 0
               ? whSinceBarEntry
               : learnedWhPerBar[lb] * 0.7f + whSinceBarEntry * 0.3f;
+          learnedBarDrainW[lb] = learnedBarSamples[lb] == 0 || learnedBarDrainW[lb] <= 0.0f
+              ? barAvgW
+              : learnedBarDrainW[lb] * 0.7f + barAvgW * 0.3f;
           if (learnedBarSamples[lb] < 60000) learnedBarSamples[lb]++;
           saveLearnedBars();
         }
         const bool stepDown = cb < energyBarLevel;
         energyBarLevel = cb;
         whSinceBarEntry = 0.0f;
+        barEntryMs = now;
         barEntryObserved = stepDown;   // čistý vstup do dílku víme jen při poklesu
       }
     }
@@ -899,7 +1007,7 @@ void updateDecodedState(const uint8_t* mem, uint8_t brightness) {
     state.onBatteryRuntimeSec = (now - batterySessionStartMs) / 1000UL;
     const float predictW = avgDrainW > 0.0f ? avgDrainW : (drainW > 0.0f ? drainW : assumedDrainWattsForEstimate());   // klouzavý průměr; při nulové zátěži orientační minimum
     float barRemWh = 0.0f, barTotWh = 0.0f;
-    if (predictW > 0.0f && estimateRuntimeFromBars(barRemWh, barTotWh)) {
+    if (predictW > 0.0f && estimateRuntimeFromBars(state.batteryBars, predictW, barRemWh, barTotWh)) {
       // lepší model: ukotveno na naučenou energii dílků (Peukert/účinnost už v tom je)
       state.runtimeRemainingEstimateSec = barRemWh > 0.0f ? (int32_t)((barRemWh / predictW) * 3600.0f) : 0;
       state.runtimeTotalEstimateSec = barTotWh > 0.0f ? (int32_t)((barTotWh / predictW) * 3600.0f) : -1;
@@ -936,11 +1044,13 @@ void updateDecodedState(const uint8_t* mem, uint8_t brightness) {
     // Proaktivní odhad: kdyby teď vypadla síť, jak dlouho by baterie při aktuální zátěži vydržela.
     // Zátěž bereme z odhadu výstupního výkonu (dílky), energii z naučené tabulky Wh/dílek nebo Peukert prioru.
     const float projW = assumedDrainWattsForEstimate();   // při 0 zátěži počítá s min. zátěží (10 % jmen. výkonu)
-    const bool batFull = state.batteryFull || state.batteryBars >= 5;
+    const bool batFull = state.batteryFull || state.batteryBars == 5;
     float pRemWh = 0.0f, pTotWh = 0.0f;
     if (projW <= 0.0f) {
       state.runtimeProjectedSec = -1;                       // bez zátěže nelze odhadnout
-    } else if (estimateRuntimeFromBars(pRemWh, pTotWh)) {
+    } else if (!batFull && state.batteryBars > 5) {
+      state.runtimeProjectedSec = -1;                       // dílky nečitelné -> bez odhadu (dřív se tvářily jako plná baterie)
+    } else if (estimateRuntimeFromBars(state.batteryBars, projW, pRemWh, pTotWh)) {
       const float wh = batFull ? pTotWh : pRemWh;           // plná baterie -> celková energie, jinak SoC z dílků
       state.runtimeProjectedSec = wh > 0.0f ? (int32_t)((wh / projW) * 3600.0f) : 0;
     } else {
@@ -1184,6 +1294,7 @@ const char GUEST_USER[] = "guest";
 const char GUEST_PASS[] = "guest";
 
 enum AuthLevel { AUTH_NONE = 0, AUTH_GUEST = 1, AUTH_ADMIN = 2 };
+AuthLevel webAuthLevel();   // explicitní prototyp — viz pozn. u SnmpValue
 
 AuthLevel webAuthLevel() {
   lastWebReqMs = millis();   // dorazil HTTP požadavek -> web server prokazatelně žije
@@ -1255,7 +1366,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     <div class="status" id="pills"></div>
     <h2 class="label" style="margin:18px 0 8px;font-size:14px">Poslední události</h2>
     <div id="events" class="small"></div>
-    <div class="footer">Pavel Vlcek v1.20 hkfree.org</div>
+    <div class="footer">Pavel Vlcek <span id="fwv"></span> hkfree.org</div>
   </main>
   <script>
     function val(v){return v===null||v===undefined||v<0?'-':v}
@@ -1280,7 +1391,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       const batHealth=j.batteryHealthPercent!==undefined?j.batteryHealthPercent:'-';
       batteryText.textContent=(j.overheat?'teplotní alarm':(j.criticalBattery?'kritický stav před vypnutím':(j.charging?'nabíjení':((j.batteryState||'')+(j.batteryVoltageEstimate>0?' / '+Number(j.batteryVoltageEstimate).toFixed(1)+' V':'')))))+' / '+batAh+' Ah / zdraví '+batHealth+' %';loadText.textContent=j.loadState||'';
       rssi.textContent=signed(j.rssi);ip.innerHTML='IP '+(j.ip||'-')+'<br>maska '+(j.mask||'-')+'<br>brána '+(j.gw||'-')+'<br>DNS '+(j.dns||'-');diag.textContent='rámců '+val(j.frames)+' / heap '+val(j.freeHeap)+' (min '+val(j.minFreeHeap)+', blok '+val(j.maxAllocHeap)+') / err '+val(j.errors)+' / filtr '+val(j.filtered)+' / cap '+val(j.captureOk)+' / tout '+val(j.captureTimeouts)+' | běh '+fmtTime(j.uptimeSec)+' / reset: '+(j.resetReason||'?')+' / TX '+(j.txPowerDbm!==undefined?Number(j.txPowerDbm).toFixed(1)+' dBm':'?')+' / CPU '+val(j.cpuMhz)+' MHz / dílky '+val(j.barsLearned)+'/5'+(j.learnedUsableWh?' ('+val(j.learnedUsableWh)+' Wh)':'');
-      let ps='';ps+=pill(j.mainsPresent?'Síť přítomna':'Bez sítě',j.mainsPresent?'good':'bad');if(j.onBattery)ps+=pill('BĚH NA BATERII','bad');if(j.overheat)ps+=pill('PŘEHŘÁTÍ','bad');if(j.criticalBattery)ps+=pill('BATERIE 0 %','bad');if(j.charging)ps+=pill('Nabíjení','good');if(j.batteryFull)ps+=pill('Baterie plná','good');if(j.lowBattery)ps+=pill('Nízká baterie','bad');if(j.overload)ps+=pill('Přetížení','bad');if(j.overVoltage)ps+=pill('PŘEPĚTÍ V↑','warn');if(j.underVoltage)ps+=pill('PODPĚTÍ V↓','warn');if(j.alarm&&!j.overheat)ps+=pill('Alarm','bad');if(j.healthWarning)ps+=pill('Kondice baterie nízká','warn');if(j.runtimeWarning)ps+=pill('Výdrž pod limitem','warn');pills.innerHTML=ps;renderEvents()}
+      let ps='';ps+=pill(j.mainsPresent?'Síť přítomna':'Bez sítě',j.mainsPresent?'good':'bad');if(j.onBattery)ps+=pill('BĚH NA BATERII','bad');if(j.overheat)ps+=pill('PŘEHŘÁTÍ','bad');if(j.criticalBattery)ps+=pill('BATERIE 0 %','bad');if(j.charging)ps+=pill('Nabíjení','good');if(j.batteryFull)ps+=pill('Baterie plná','good');if(j.lowBattery)ps+=pill('Nízká baterie','bad');if(j.overload)ps+=pill('Přetížení','bad');if(j.overVoltage)ps+=pill('PŘEPĚTÍ V↑','warn');if(j.underVoltage)ps+=pill('PODPĚTÍ V↓','warn');if(j.alarm&&!j.overheat)ps+=pill('Alarm','bad');if(j.healthWarning)ps+=pill('Kondice baterie nízká','warn');if(j.runtimeWarning)ps+=pill('Výdrž pod limitem','warn');pills.innerHTML=ps;document.getElementById('fwv').textContent=j.fwVersion?'v'+j.fwVersion:'';renderEvents()}
     document.getElementById('logoutLink').addEventListener('click',function(e){e.preventDefault();var x=new XMLHttpRequest();x.open('GET','/logout',true,'logout','logout');x.onloadend=function(){location.replace('/')};x.send();});
     setInterval(tick,3000);tick();
   </script>
@@ -1310,7 +1421,7 @@ void sendStatusJson(bool isAdmin) {
     "\"freeHeap\":%u,\"rssi\":%d,\"ip\":\"%s\",\"mask\":\"%s\",\"gw\":\"%s\",\"dns\":\"%s\","
     "\"resetReason\":\"%s\",\"uptimeSec\":%lu,\"minFreeHeap\":%u,\"maxAllocHeap\":%u,"
     "\"txPowerDbm\":%.2f,\"cpuMhz\":%u,\"barsLearned\":%u,\"learnedUsableWh\":%d,"
-    "\"hwId\":\"%s\","
+    "\"hwId\":\"%s\",\"fwVersion\":\"%s\","
     "\"settings\":{\"deviceName\":\"%s\",\"sourceWatts\":%u,\"batteryAh\":%.1f,\"batterySystemVoltage\":%u,\"batteryInstallDate\":\"%s\","
     "\"healthWarnPercent\":%u,\"minRuntimeMinutes\":%u}}",
     isAdmin ? "true" : "false",
@@ -1370,6 +1481,7 @@ void sendStatusJson(bool isAdmin) {
     barsLearnedCount(),
     learnedUsableWh,
     deviceHwId().c_str(),
+    FW_VERSION,
     settings.deviceName,
     settings.sourceWatts,
     settings.batteryAh,
@@ -1433,11 +1545,20 @@ void handleSettings() {
         settings.webUser[sizeof(settings.webUser) - 1] = 0;
       }
     }
+    // Heslo správce se změní JEN když se obě pole shodují — překlep v jednom poli by jinak
+    // znamenal ztrátu přístupu (heslo se nikde nezobrazuje). Neshoda heslo nechá být,
+    // ostatní nastavení se uloží normálně a formulář ukáže varování (perr=1).
+    bool webPassMismatch = false;
     if (server.hasArg("webPass")) {
       String v = server.arg("webPass");
-      if (v.length() > 0 && v.length() < sizeof(settings.webPass)) {
-        strncpy(settings.webPass, v.c_str(), sizeof(settings.webPass) - 1);
-        settings.webPass[sizeof(settings.webPass) - 1] = 0;
+      if (v.length() > 0) {
+        String v2 = server.hasArg("webPass2") ? server.arg("webPass2") : String();
+        if (v != v2) {
+          webPassMismatch = true;
+        } else if (v.length() < sizeof(settings.webPass)) {
+          strncpy(settings.webPass, v.c_str(), sizeof(settings.webPass) - 1);
+          settings.webPass[sizeof(settings.webPass) - 1] = 0;
+        }
       }
     }
     if (server.hasArg("ssid")) {
@@ -1516,7 +1637,7 @@ void handleSettings() {
       resetLearnedBars();   // nová baterie -> zahodit naučenou tabulku Wh/dílek
     }
     saveSettings();
-    server.sendHeader("Location", "/settings?saved=1");
+    server.sendHeader("Location", webPassMismatch ? "/settings?saved=1&perr=1" : "/settings?saved=1");
     server.send(303);
     return;
   }
@@ -1534,19 +1655,25 @@ void handleSettings() {
   }
   html += F("</h1></header><main><p><a href='/'>zpět na monitor</a> | <a href='/logout' id='logoutLink'>odhlásit</a></p>");
   if (server.hasArg("saved")) html += F("<p class='note'>Uloženo.</p>");
+  if (server.hasArg("perr")) html += F("<p class='note' style='color:#ff9d9d'><b>Heslo správce NEBYLO změněno</b> &mdash; zadaná hesla se neshodují. Ostatní nastavení se uložila.</p>");
   html += F("<form method='post' action='/settings'>");
 
   html += F("<h2 class='sectionTitle'>Zařízení a přístup</h2><section class='grid'>");
   html += F("<div class='field'><label>Pojmenování zdroje</label><input name='devName' maxlength='32' value='");
   html += escHtml(settings.deviceName);
-  html += F("'></div><div class='field'><label>Web uživatel (správce)</label><input name='webUser' maxlength='16' value='");
-  html += escHtml(settings.webUser);
-  html += F("'></div><div class='field'><label>Web heslo (správce)</label><input name='webPass' maxlength='32' type='password' placeholder='(beze změny)' value='");
   html += F("'></div><div class='field'><label>SNMP community</label><input name='snmp' maxlength='32' value='");
   html += escHtml(settings.snmpCommunity);
   html += F("'></div><div class='field'><label>NTP server</label><input name='ntp' maxlength='47' value='");
   html += escHtml(settings.ntpServer);
   html += F("'></div></section>");
+
+  html += F("<h2 class='sectionTitle'>Přihlášení do webu (správce)</h2><section class='grid'>");
+  html += F("<div class='field'><label>Uživatel</label><input name='webUser' maxlength='16' value='");
+  html += escHtml(settings.webUser);
+  html += F("'></div><div class='field'><label>Nové heslo</label><input name='webPass' maxlength='32' type='password' autocomplete='new-password' placeholder='(beze změny)'></div>");
+  html += F("<div class='field'><label>Nové heslo znovu (ověření)</label><input name='webPass2' maxlength='32' type='password' autocomplete='new-password' placeholder='(beze změny)'></div>");
+  html += F("</section>");
+  html += F("<p class='note'>Heslo se změní, jen když jsou obě pole vyplněná <b>shodně</b> &mdash; pojistka proti překlepu, kterým by ses odřízl od webu. Prázdná pole = heslo beze změny.</p>");
   html += F("<p class='note'>Jen pro čtení existuje napevno účet <b>guest</b> / heslo <b>guest</b> &mdash; vidí dashboard a hodnoty, ale nic nezmění.</p>");
 
   html += F("<h2 class='sectionTitle'>Wi-Fi připojení</h2>");
@@ -1610,7 +1737,7 @@ void handleSettings() {
   html += F("<h2 class='sectionTitle'>Rozhraní (API)</h2><section class='grid'>");
   html += F("<div class='field'><label>HTTP API (JSON)</label><a href='/api/status' target='_blank'>/api/status</a> &mdash; živý stav zdroje<br><a href='/api/events' target='_blank'>/api/events</a> &mdash; poslední události</div>");
   html += F("<div class='field'><label>Dev-skeny (text)</label><a href='/api/digitscan' target='_blank'>/api/digitscan</a> &mdash; neznámé číslice displeje<br><a href='/api/iconscan' target='_blank'>/api/iconscan</a> &mdash; ikony při přepětí/podpětí</div>");
-  html += F("<div class='field'><label>SNMP v1</label>UDP/161, community dle nastavení<br>OID 1.3.6.1.4.1.53864.1.1 (idx 1&ndash;49)</div>");
+  html += F("<div class='field'><label>SNMP v1</label>UDP/161, community dle nastavení<br>OID 1.3.6.1.4.1.53864.1.1 (idx 1&ndash;50)</div>");
   html += F("</section>");
   html += F("<p class='note'>API i dev-skeny vyžadují přihlášení správce; host (jen čtení) se přihlásí na <code>/api/status</code> a <code>/api/events</code>.</p>");
 
@@ -1624,8 +1751,11 @@ void handleSettings() {
   html += F("<form method='post' action='/restart'><button class='restart' type='submit'>Restartovat ESP32</button></form></div>");
   html += F("</section>");
 
-  html += F("<div class='footer'>Pavel Vlcek v1.20 hkfree.org</div></main>");
+  html += F("<div class='footer'>Pavel Vlcek v");
+  html += FW_VERSION;
+  html += F(" hkfree.org</div></main>");
   html += F("<script>(function(){var l=document.getElementById('logoutLink');if(l)l.addEventListener('click',function(e){e.preventDefault();var x=new XMLHttpRequest();x.open('GET','/logout',true,'logout','logout');x.onloadend=function(){location.replace('/')};x.send();});})();</script>");
+  html += F("<script>(function(){var f=document.querySelector(\"form[action='/settings']\");if(!f)return;f.addEventListener('submit',function(e){var a=f.querySelector(\"input[name='webPass']\").value,b=f.querySelector(\"input[name='webPass2']\").value;if(a!==b){e.preventDefault();alert('Hesla správce se neshodují — oprav je, nebo obě pole nech prázdná.');}});})();</script>");
   html += F("<script>(function(){var f=document.getElementById('fwform');if(!f)return;"
             "f.addEventListener('submit',function(e){e.preventDefault();"
             "var fi=document.getElementById('fwfile');if(!fi.files.length){return}"
@@ -1703,7 +1833,7 @@ void handleUpdateDone() {
 
 const uint32_t SNMP_BASE_OID[] = {1, 3, 6, 1, 4, 1, 53864, 1, 1};
 const uint8_t SNMP_BASE_LEN = sizeof(SNMP_BASE_OID) / sizeof(SNMP_BASE_OID[0]);
-const uint8_t SNMP_MAX_INDEX = 49;  // idx 49 = runtimeProjectedSec (odhad výdrže na síti); dřív 48 → .49 byl nedostupný
+const uint8_t SNMP_MAX_INDEX = 50;  // idx 50 = verze firmwaru (string)
 
 bool readBerLen(const uint8_t* data, int total, int& pos, int& len) {
   if (pos >= total) return false;
@@ -1888,6 +2018,7 @@ bool getSnmpValue(uint8_t idx, SnmpValue& value) {
     case 47: value.integer = state.underVoltage ? 1 : 0; break;  // podpětí (V↓, AVR zvyšuje)
     case 48: value.type = 0x04; strncpy(value.text, state.avrState, sizeof(value.text) - 1); break;  // AVR stav: buck/boost/normal/n-a
     case 49: value.integer = state.runtimeProjectedSec; break;  // proaktivní odhad výdrže [s] (na síti: kdyby teď vypadl proud)
+    case 50: value.type = 0x04; strncpy(value.text, FW_VERSION, sizeof(value.text) - 1); break;  // verze firmwaru
     default: return false;
   }
   value.text[sizeof(value.text) - 1] = 0;
@@ -2171,8 +2302,8 @@ void sendDigitScan() {
   const uint8_t col = unkLog.lastPos % 3;   // 0=stovky 1=desitky 2=jednotky
   const char* colName = col == 0 ? "stovky" : (col == 1 ? "desitky" : "jednotky");
   int n = snprintf(responseBody, sizeof(responseBody),
-                   "nezname cislice displeje - fw v1.20\n"
-                   "celkem zachyceno: %lu\n", (unsigned long)unkLog.total);
+                   "nezname cislice displeje - fw v%s\n"
+                   "celkem zachyceno: %lu\n", FW_VERSION, (unsigned long)unkLog.total);
   if (unkLog.total) {
     const int8_t g = guessDigitFromSegments(unkLog.lastPattern);
     n += snprintf(responseBody + n, sizeof(responseBody) - n,
@@ -2209,10 +2340,10 @@ void handleDigitScan() {
 
 void sendIconScan() {
   int n = snprintf(responseBody, sizeof(responseBody),
-                   "icon-scan ikon displeje (hledame V-nahoru/V-dolu pri prepeti/podpeti) - fw v1.20\n"
+                   "icon-scan ikon displeje (hledame V-nahoru/V-dolu pri prepeti/podpeti) - fw v%s\n"
                    "celkem vzorku: %lu | normalni pasmo vstupu 207-253 V\n"
                    "mem[6]=mode, mem[8]=ikony; porovnej hodnoty pri prepeti/podpeti s normalem.\n",
-                   (unsigned long)iconLog.total);
+                   FW_VERSION, (unsigned long)iconLog.total);
   if (iconLog.hiV >= 0)
     n += snprintf(responseBody + n, sizeof(responseBody) - n,
                   "PREPETI (>253V): mode=0x%02X icon=0x%02X pri %d V, pred %lu s\n",
