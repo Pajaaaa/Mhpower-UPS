@@ -120,6 +120,24 @@ u dlouhých/rušených vodičů — zašuměné hrany byly příčina dřívěj�
 Schémata: [`docs/zapojeni_spravne.png`](docs/zapojeni_spravne.png) (celé zapojení),
 [`docs/zapojeni_chip.png`](docs/zapojeni_chip.png) (detail pinů 74LVC14).
 
+### Napájení a ochrana proti zaseknutí při brownoutu
+
+ESP32 DevKit se napájí z **5V větve samotného zdroje** (deska si 3,3 V dělá sama on-board
+AMS1117). Když je tahle 5V odbočka měkká nebo přijde krátký propad napájení, ESP32 se
+**nemusí čistě zresetovat** — napětí klesne dost na rozhození logiky, ale ne tak, aby EN udělal
+power-on reset → ESP zůstane **viset** (a watchdog v té fázi ještě neběží).
+
+> **Bulk kondenzátor to neřeší, spíš uškodí.** Na měkké 5V větvi velký kondík zpomalí náběh
+> napětí (RC rampf) → ESP se pustí za nedostatečného VDD a zasekne se už při startu.
+
+Řešení je oddělit spuštění ESP od průběhu napájení — **reset supervisor na pin EN**
+(MCP809-3.08, případně APX803S-29 / TPS3839L30): hlídá 3V3 a při každém poklesu pod ~3,08 V
+stáhne EN k zemi (tvrdý reset), po návratu drží reset ~240 ms a pak pustí = vždy čistý start.
+Pull-up 10k + 1 µF na EN už DevKit má, takže stačí tři spoje (VDD→3V3, GND→GND,
+open-drain /RESET→EN). Volitelně 22 µF na 3V3 blízko desky.
+
+Schéma: [`docs/napajeni-en-supervisor.svg`](docs/napajeni-en-supervisor.svg).
+
 <p align="center">
   <img src="docs/foto-realizace/thumb-zapojeni-esp.jpg" width="300" alt="ESP32 napájený na desku displeje s TM1640 a 74LVC14A">
   &nbsp;&nbsp;

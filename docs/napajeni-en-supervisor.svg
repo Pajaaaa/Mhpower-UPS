@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 700" font-family="'DejaVu Sans','Segoe UI',sans-serif">
+  <rect x="0" y="0" width="940" height="700" fill="#ffffff"/>
+  <text x="470" y="38" text-anchor="middle" font-size="22" font-weight="700" fill="#12343d">Reset supervisor na EN — ochrana ESP proti zaseknutí při brownoutu</text>
+  <text x="470" y="60" text-anchor="middle" font-size="13" fill="#5e7d85">MHpower monitor · ESP32 DevKit napájený z 5V větve zdroje</text>
+
+  <!-- ===== ESP32 DevKit ===== -->
+  <rect x="70" y="150" width="270" height="330" rx="12" fill="#eef4f5" stroke="#0c4856" stroke-width="2.5"/>
+  <text x="205" y="180" text-anchor="middle" font-size="17" font-weight="700" fill="#0c4856">ESP32 DevKit</text>
+  <text x="205" y="200" text-anchor="middle" font-size="11" fill="#5e7d85">(3V3 dělá on-board AMS1117)</text>
+
+  <!-- piny na pravé hraně -->
+  <!-- 5V -->
+  <rect x="332" y="222" width="16" height="16" fill="#e8871e"/>
+  <text x="322" y="234" text-anchor="end" font-size="14" font-weight="600" fill="#12343d">5V / VIN</text>
+  <!-- 3V3 -->
+  <rect x="332" y="282" width="16" height="16" fill="#d64545"/>
+  <text x="322" y="294" text-anchor="end" font-size="14" font-weight="600" fill="#12343d">3V3</text>
+  <!-- EN -->
+  <rect x="332" y="342" width="16" height="16" fill="#2a7de1"/>
+  <text x="322" y="354" text-anchor="end" font-size="14" font-weight="600" fill="#12343d">EN</text>
+  <text x="322" y="370" text-anchor="end" font-size="10" fill="#5e7d85">(pull-up 10k + 1µF už na desce)</text>
+  <!-- GND -->
+  <rect x="332" y="430" width="16" height="16" fill="#444444"/>
+  <text x="322" y="442" text-anchor="end" font-size="14" font-weight="600" fill="#12343d">GND</text>
+
+  <!-- ===== 5V přívod ze zdroje ===== -->
+  <text x="205" y="112" text-anchor="middle" font-size="13" font-weight="700" fill="#e8871e">5V ze zdroje ⚡</text>
+  <path d="M205 120 L205 230 L332 230" fill="none" stroke="#e8871e" stroke-width="3"/>
+  <polygon points="332,230 322,225 322,235" fill="#e8871e"/>
+
+  <!-- ===== MCP809 pouzdro (logické schéma) ===== -->
+  <rect x="600" y="250" width="180" height="150" rx="10" fill="#fff5e6" stroke="#b9742a" stroke-width="2.5"/>
+  <text x="690" y="282" text-anchor="middle" font-size="16" font-weight="700" fill="#b9742a">MCP809-3.08</text>
+  <text x="690" y="299" text-anchor="middle" font-size="11" fill="#5e7d85">reset supervisor</text>
+  <text x="748" y="345" text-anchor="middle" font-size="10.5" fill="#5e7d85">3,08 V</text>
+  <text x="748" y="359" text-anchor="middle" font-size="10.5" fill="#5e7d85">240 ms</text>
+
+  <!-- MCP809 vývody -->
+  <!-- pin3 VDD, levá horní -->
+  <rect x="592" y="312" width="8" height="8" fill="#d64545"/>
+  <text x="608" y="320" font-size="12" font-weight="600" fill="#12343d">3 · VDD</text>
+  <!-- pin1 /RESET, levá dolní -->
+  <rect x="592" y="352" width="8" height="8" fill="#2a7de1"/>
+  <text x="608" y="360" font-size="12" font-weight="600" fill="#12343d">1 · /RESET</text>
+  <text x="608" y="373" font-size="9" fill="#b9742a">open-drain</text>
+  <!-- pin2 GND, spodek -->
+  <rect x="686" y="396" width="8" height="8" fill="#444444"/>
+  <text x="690" y="418" text-anchor="middle" font-size="12" font-weight="600" fill="#12343d">2 · GND</text>
+
+  <!-- ===== vodiče ===== -->
+  <!-- 3V3 -> VDD (červená) -->
+  <path d="M348 290 L470 290 L470 316 L592 316" fill="none" stroke="#d64545" stroke-width="3"/>
+  <!-- EN -> /RESET (modrá) -->
+  <path d="M348 350 L520 350 L520 356 L592 356" fill="none" stroke="#2a7de1" stroke-width="3"/>
+  <!-- GND sběrnice (černá): ESP GND -> dolů -> doprava -> MCP809 GND -->
+  <path d="M348 438 L500 438 L500 560 L690 560 L690 404" fill="none" stroke="#444444" stroke-width="3"/>
+  <text x="360" y="432" font-size="11" fill="#5e7d85">GND (společná se zdrojem)</text>
+
+  <!-- ===== 22µF volitelně: z 3V3 vodiče do GND sběrnice ===== -->
+  <path d="M470 290 L470 560" fill="none" stroke="#d64545" stroke-width="2" stroke-dasharray="5 4"/>
+  <!-- symbol kondíku na 415,y -->
+  <line x1="452" y1="470" x2="488" y2="470" stroke="#12343d" stroke-width="3"/>
+  <line x1="452" y1="482" x2="488" y2="482" stroke="#12343d" stroke-width="3"/>
+  <text x="498" y="472" font-size="12" font-weight="600" fill="#12343d">22 µF</text>
+  <text x="498" y="487" font-size="10" fill="#5e7d85">volitelně, blízko desky</text>
+
+  <!-- ===== SOT-23-3 top view inset ===== -->
+  <rect x="610" y="90" width="170" height="120" rx="8" fill="#fafafa" stroke="#c9c9c9" stroke-width="1.5"/>
+  <text x="695" y="110" text-anchor="middle" font-size="12" font-weight="700" fill="#12343d">SOT-23-3 (pohled shora)</text>
+  <rect x="662" y="128" width="66" height="46" rx="4" fill="#333" />
+  <!-- nožičky: pin1 dole vlevo, pin2 dole vpravo, pin3 nahoře uprostřed -->
+  <rect x="668" y="174" width="10" height="12" fill="#888"/>
+  <text x="673" y="200" text-anchor="middle" font-size="11" fill="#12343d">1</text>
+  <rect x="712" y="174" width="10" height="12" fill="#888"/>
+  <text x="717" y="200" text-anchor="middle" font-size="11" fill="#12343d">2</text>
+  <rect x="690" y="116" width="10" height="12" fill="#888"/>
+  <text x="695" y="128" text-anchor="middle" font-size="11" fill="#fff">3</text>
+  <text x="748" y="150" font-size="9" fill="#5e7d85">1 /RST</text>
+  <text x="748" y="163" font-size="9" fill="#5e7d85">2 GND</text>
+  <text x="748" y="176" font-size="9" fill="#5e7d85">3 VDD</text>
+
+  <!-- ===== legenda barev ===== -->
+  <g font-size="12" fill="#12343d">
+    <rect x="80" y="610" width="26" height="6" fill="#e8871e"/><text x="114" y="616">5V</text>
+    <rect x="160" y="610" width="26" height="6" fill="#d64545"/><text x="194" y="616">3V3</text>
+    <rect x="250" y="610" width="26" height="6" fill="#2a7de1"/><text x="284" y="616">EN / reset</text>
+    <rect x="370" y="610" width="26" height="6" fill="#444444"/><text x="404" y="616">GND</text>
+  </g>
+
+  <!-- ===== poznámky ===== -->
+  <g font-size="12.5" fill="#12343d">
+    <text x="80" y="652" font-weight="700" fill="#0c4856">Jak to funguje</text>
+    <text x="80" y="672">Klesne-li 3V3 pod 3,08 V → /RESET stáhne EN k zemi (tvrdý reset). Po návratu drží reset ~240 ms, pak EN pustí = čistý start.</text>
+    <text x="80" y="690">Pull-up 10k + 1µF na EN jsou na DevKitu — <tspan font-weight="700">nic tam nepřidávej</tspan>. Náhrady: APX803S-29 nebo TPS3839L30 (zapojit stejně).</text>
+  </g>
+</svg>
