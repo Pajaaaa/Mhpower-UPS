@@ -40,7 +40,7 @@ Projekt ve čtyřech etapách (1. etapa odpovídá limitu ~40 čh dle směrnice)
 
 ## Požadované zdroje
 
-**Hardware (na jednotku) → hrazeno ze zdrojů řešitele:**
+**Hardware (na jednotku):**
 - ESP32 DevKit
 - Schmittův invertor 74LVC14A (level-shift 5V→3V3 + čištění hran)
 - Pasivní součástky (1k vstup, 100R výstup, bulk kondenzátor)
