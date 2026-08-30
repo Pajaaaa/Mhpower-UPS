@@ -58,6 +58,8 @@ Na lokality bez ethernetu navíc MikroTik mAP lite. Dále přístup do sítě 10
 
 ## Rozpočet
 
+- Práce ownera: ~150 člověkohodin × 500 Kč/h = **75 000 Kč** (vývoj, ladění,
+  integrace, rollout; nad rámec toho výjezdy na lokality)
 - ESP32 DevKit + součástky: ~250 Kč / jednotka
 - MikroTik mAP lite (jen lokality bez ethernetu): ~700 Kč / kus
 - Provozní náklady: zanedbatelné (odběr ESP jednotky v úsporném režimu, sdílený
