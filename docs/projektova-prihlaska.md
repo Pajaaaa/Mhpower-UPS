@@ -66,7 +66,7 @@ Provozní náklady: zanedbatelné (odběr ESP v úsporném režimu, sdílený po
 
 ## Owner projektu
 
-**Pavel Vlček (Pája)** — nosek@netium.cz
+**Pavel Vlček (Pája)** — pvlcek@seznam.cz
 
 ## Technologický stack
 
