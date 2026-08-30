@@ -57,7 +57,7 @@ Projekt ve čtyřech etapách (1. etapa odpovídá limitu ~40 čh dle směrnice)
 
 | Položka | Cena (orientační) |
 |---|---|
-| Práce ownera (~150 čh × 500 Kč/h) | **75 000 Kč** |
+| Práce ownera | ~150 člověkohodin (dobrovolnicky, bez nároku na odměnu) |
 | ESP32 DevKit + součástky | ~250 Kč / jednotka |
 | MikroTik mAP lite (jen lokality bez ethernetu) | ~700 Kč / kus |
 | **Hardware celkem (5 jednotek + 1× mAP)** | **~1 950 Kč** |
