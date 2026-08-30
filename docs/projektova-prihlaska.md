@@ -37,7 +37,6 @@ Projekt ve čtyřech etapách (1. etapa odpovídá limitu ~40 čh dle směrnice)
 | Etapa 2 — firmware (web, SNMP, OTA, ladění na živých kusech, ~20 verzí) | ~80 čh |
 | Etapa 3 — integrace power monitor | ~15 čh |
 | Etapa 4 — rollout 5 jednotek | ~20 čh |
-| Výjezdy na lokality | dle potřeby |
 
 ## Požadované zdroje
 
