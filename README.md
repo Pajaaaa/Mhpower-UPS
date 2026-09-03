@@ -291,7 +291,7 @@ Síť a výdrž: **46** přepětí (1/0), **47** podpětí (1/0), **48** (str) s
 
 Verze: **50** (str) verze firmwaru (od v1.21; power monitor ji zobrazuje v detailu zdroje).
 
-Diagnostika: **51** rámce zahozené sanity kontrolou rámce (od v1.22; `rejected` v `/api/status`).
+Diagnostika: **51** rámce zahozené sanity kontrolou rámce (od v1.22/1.23; `rejected` v `/api/status`).
 
 Příklad: `snmpwalk -v1 -c public <IP> 1.3.6.1.4.1.53864.1.1`
 

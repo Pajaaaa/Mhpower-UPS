@@ -43,7 +43,7 @@ const uint32_t CAPTURE_INTERVAL_MS = 200;  // throttle: nesnímat naplno pořád
 const uint8_t SOURCE_CONFIRM_FRAMES = 3;
 const uint16_t SNMP_PORT = 161;
 
-const char FW_VERSION[] = "1.22";   // jediné místo s verzí: web, /api/status, SNMP idx 50, dev-skeny
+const char FW_VERSION[] = "1.23";   // jediné místo s verzí: web, /api/status, SNMP idx 50, dev-skeny
 
 // --- baterie / energie ---
 const float BATTERY_NOMINAL_V = 12.0f;
@@ -492,8 +492,11 @@ static inline uint8_t readPins() {
   return clk | (din << 1);
 }
 
+// Bit 0x80 (DP) není součástí žádné číslice — 0–9 se liší v dolních 7 bitech. Na hlučném kuse
+// (Čeperka 1) se DP náhodně objevoval u 0/2/3/7/9 (0xF7/0xEE/0xED/0xE1/0xFD) a takový rámec
+// padal do filtru jako „neznámá číslice"; proto se DP maskuje (8 = 0x7F, dřív jen 0xFF).
 int digitFromPattern(uint8_t p) {
-  switch (p) {
+  switch (p & 0x7F) {
     case 0x77: return 0;
     case 0x41: return 1;
     case 0x6E: return 2;
@@ -502,7 +505,7 @@ int digitFromPattern(uint8_t p) {
     case 0x3D: return 5;
     case 0x3F: return 6;
     case 0x61: return 7;
-    case 0xFF: return 8;
+    case 0x7F: return 8;
     case 0x7D: return 9;  // potvrzeno digit-scanem (0x7D x674 pres noc)
     case 0x00: return -2;
     default: return -1;
