@@ -213,7 +213,7 @@ Odkaz **„odhlásit“** (v hlavičce monitoru i v systému) zahodí uložené 
 
 - `/api/status` — JSON se všemi hodnotami (+ pole `isAdmin`); čte host i správce.
 - `/api/events` — JSON posledních událostí; čte host i správce.
-- `/api/digitscan`, `/api/iconscan` — textové vývojové skeny displeje (jen správce).
+- `/api/digitscan`, `/api/iconscan` — textové vývojové skeny displeje (jen správce). Od v1.22 mají uint32 čítače, icon-scan 16 slotů + `maxrun` (nejdelší souvislá řada rámců — šum = 1–2, reálná ikona = desítky) a `?reset=1` vynuluje histogram.
 
 Dlaždice **Diagnostika** ukazuje:
 `rámců N / heap (min, blok) / err / filtr / cap / tout | běh / reset: … / TX … dBm / CPU … MHz / dílky x/5`.
@@ -290,6 +290,8 @@ Síť a výdrž: **46** přepětí (1/0), **47** podpětí (1/0), **48** (str) s
 **49** proaktivní odhad výdrže [s] (i na síti = „kdyby teď vypadl proud“).
 
 Verze: **50** (str) verze firmwaru (od v1.21; power monitor ji zobrazuje v detailu zdroje).
+
+Diagnostika: **51** rámce zahozené sanity kontrolou rámce (od v1.22; `rejected` v `/api/status`).
 
 Příklad: `snmpwalk -v1 -c public <IP> 1.3.6.1.4.1.53864.1.1`
 

@@ -43,7 +43,7 @@ const uint32_t CAPTURE_INTERVAL_MS = 200;  // throttle: nesnímat naplno pořád
 const uint8_t SOURCE_CONFIRM_FRAMES = 3;
 const uint16_t SNMP_PORT = 161;
 
-const char FW_VERSION[] = "1.21";   // jediné místo s verzí: web, /api/status, SNMP idx 50, dev-skeny
+const char FW_VERSION[] = "1.22";   // jediné místo s verzí: web, /api/status, SNMP idx 50, dev-skeny
 
 // --- baterie / energie ---
 const float BATTERY_NOMINAL_V = 12.0f;
@@ -118,6 +118,7 @@ struct DisplayState {
   uint32_t byteCount = 0;
   uint32_t decodeErrors = 0;
   uint32_t filteredFrames = 0;
+  uint32_t rejectedFrames = 0;   // rámce zahozené sanity kontrolou (frameLooksCorrupt)
   uint32_t captureOk = 0;
   uint32_t captureTimeouts = 0;
   uint32_t lastCaptureMs = 0;
@@ -181,8 +182,8 @@ RawDebugState rawDebug;
 // číslici, kterou tabulka digitFromPattern() ještě nezná. Zapíšeme její syrový
 // bajt + kontext, ať jde dohledat i bez sériáku (čte se přes /api/digitscan).
 struct UnknownDigitLog {
-  uint8_t pattern[8] = {0};   // až 8 různých neznámých bajtů
-  uint16_t count[8] = {0};    // kolikrát se každý objevil
+  uint8_t pattern[12] = {0};  // až 12 různých neznámých bajtů
+  uint32_t count[12] = {0};   // kolikrát se každý objevil (uint32: uint16 na hlučném kuse přetekl za pár dní)
   uint8_t distinct = 0;       // kolik slotů je obsazeno
   uint8_t lastPattern = 0;    // poslední neznámý bajt
   uint8_t lastPos = 0;        // pozice 0..5 (0–2 vstup, 3–5 výstup)
@@ -196,11 +197,17 @@ UnknownDigitLog unkLog;
 // --- icon-scan: histogram bajtů ikon mem[6] (mode) a mem[8] (ikony) s kontextem
 // vstupního napětí. Hledáme bity přepětí V↑ / podpětí V↓ / ⚠️, které svítí jen když
 // síť vyjede z pásma ~207–253 V. Čte se přes /api/iconscan.
+// Čítače uint32 a 16 slotů: Čeperka 1 (hlučný kus) za 49 dní přetekla uint16 (65535) i 12 slotů,
+// takže nová hodnota už neměla kam. maxRun = nejdelší souvislá řada rámců s touto hodnotou:
+// odliší reálnou ikonu (svítí/bliká = řady desítek rámců) od šumu jednoho rámce (maxRun 1–2).
+#define ICON_SCAN_SLOTS 16
 struct IconScanLog {
-  uint8_t mode[12] = {0};   uint16_t modeCount[12] = {0};   uint8_t modeDistinct = 0;
-  uint8_t icon[12] = {0};   uint16_t iconCount[12] = {0};   uint8_t iconDistinct = 0;
+  uint8_t mode[ICON_SCAN_SLOTS] = {0};   uint32_t modeCount[ICON_SCAN_SLOTS] = {0};   uint16_t modeRun[ICON_SCAN_SLOTS] = {0};   uint8_t modeDistinct = 0;
+  uint8_t icon[ICON_SCAN_SLOTS] = {0};   uint32_t iconCount[ICON_SCAN_SLOTS] = {0};   uint16_t iconRun[ICON_SCAN_SLOTS] = {0};   uint8_t iconDistinct = 0;
+  uint8_t lastMode = 0, lastIcon = 0; uint16_t curModeRun = 0, curIconRun = 0;
   uint8_t hiMode = 0, hiIcon = 0; int hiV = -1; uint32_t hiEpoch = 0;   // záchyt při vstupu >253 V
   uint8_t loMode = 0, loIcon = 0; int loV = -1; uint32_t loEpoch = 0;   // záchyt při vstupu <207 V
+  int prevInputV = -1;        // vstup předchozího rámce: hi/lo záchyt chce 2 rámce po sobě mimo pásmo (ne glitch „98 V")
   uint32_t total = 0;
 };
 IconScanLog iconLog;
@@ -229,6 +236,14 @@ uint8_t pendingOverloadCount = 0;
 bool stableOverheat = false;
 bool pendingOverheat = false;
 uint8_t pendingOverheatCount = 0;
+// přepětí/podpětí (odvozené z dekódovaného vstupu) taky: jeden glitchnutý rámec („98 V" z 239 V)
+// dřív na 1 rámec zapnul underVoltage/avrState=boost (viditelné v SNMP idx 47/48 při pollu)
+bool stableOverVoltage = false;
+bool pendingOverVoltage = false;
+uint8_t pendingOverVoltageCount = 0;
+bool stableUnderVoltage = false;
+bool pendingUnderVoltage = false;
+uint8_t pendingUnderVoltageCount = 0;
 // dílky baterie dostávají stejný debounce: jeden glitchnutý rámec s platným, ale jiným vzorem
 // by jinak zapsal falešný přechod dílku do učení Wh/dílek (EMA váha 0,3!) a resetoval
 // počítadlo energie dílku. Nečitelný vzor (255) drží poslední známou hodnotu.
@@ -749,9 +764,9 @@ void registerUnknownPattern(uint8_t val, uint8_t pos, const uint8_t* mem) {
   unkLog.lastEpoch = nowEpoch();
   unkLog.lastUptime = uptimeSec();
   for (uint8_t i = 0; i < unkLog.distinct; i++) {
-    if (unkLog.pattern[i] == val) { if (unkLog.count[i] < 0xFFFF) unkLog.count[i]++; return; }
+    if (unkLog.pattern[i] == val) { unkLog.count[i]++; return; }
   }
-  if (unkLog.distinct < 8) {
+  if (unkLog.distinct < 12) {
     unkLog.pattern[unkLog.distinct] = val;
     unkLog.count[unkLog.distinct] = 1;
     unkLog.distinct++;
@@ -773,18 +788,47 @@ void recordUnknownDigits(const uint8_t* mem) {
   }
 }
 
-static void iconAddDistinct(uint8_t* vals, uint16_t* counts, uint8_t* n, uint8_t v, uint8_t cap) {
-  for (uint8_t i = 0; i < *n; i++) { if (vals[i] == v) { if (counts[i] < 0xFFFF) counts[i]++; return; } }
-  if (*n < cap) { vals[*n] = v; counts[*n] = 1; (*n)++; }
+// přičti hodnotu do histogramu; run = aktuální délka souvislé řady této hodnoty (pro maxRun)
+static void iconAddDistinct(uint8_t* vals, uint32_t* counts, uint16_t* runs, uint8_t* n, uint8_t v, uint16_t run) {
+  for (uint8_t i = 0; i < *n; i++) {
+    if (vals[i] == v) { counts[i]++; if (run > runs[i]) runs[i] = run; return; }
+  }
+  if (*n < ICON_SCAN_SLOTS) { vals[*n] = v; counts[*n] = 1; runs[*n] = run; (*n)++; }
 }
 
-// zaznamenej ikonové bajty s kontextem vstupního napětí; inputV = -1 mimo síť (lo se nezapíše)
+void resetIconScan() { iconLog = IconScanLog(); }
+void resetDigitScan() { unkLog = UnknownDigitLog(); }
+
+// zaznamenej ikonové bajty s kontextem vstupního napětí; inputV = -1 mimo síť (lo se nezapíše).
+// Záchyt hi/lo chce vstup mimo pásmo ve DVOU rámcích po sobě — jeden zkažený rámec („98 V")
+// dřív zapsal falešné podpětí s normálními ikonami a přepsal tím případný reálný záchyt.
 void recordIconScan(const uint8_t* mem, int inputV) {
   iconLog.total++;
-  iconAddDistinct(iconLog.mode, iconLog.modeCount, &iconLog.modeDistinct, mem[6], 12);
-  iconAddDistinct(iconLog.icon, iconLog.iconCount, &iconLog.iconDistinct, mem[8], 12);
-  if (inputV > 253) { iconLog.hiMode = mem[6]; iconLog.hiIcon = mem[8]; iconLog.hiV = inputV; iconLog.hiEpoch = nowEpoch(); }
-  else if (inputV >= 0 && inputV < 207) { iconLog.loMode = mem[6]; iconLog.loIcon = mem[8]; iconLog.loV = inputV; iconLog.loEpoch = nowEpoch(); }
+  if (iconLog.total > 1 && mem[6] == iconLog.lastMode) { if (iconLog.curModeRun < 0xFFFF) iconLog.curModeRun++; }
+  else iconLog.curModeRun = 1;
+  if (iconLog.total > 1 && mem[8] == iconLog.lastIcon) { if (iconLog.curIconRun < 0xFFFF) iconLog.curIconRun++; }
+  else iconLog.curIconRun = 1;
+  iconLog.lastMode = mem[6];
+  iconLog.lastIcon = mem[8];
+  iconAddDistinct(iconLog.mode, iconLog.modeCount, iconLog.modeRun, &iconLog.modeDistinct, mem[6], iconLog.curModeRun);
+  iconAddDistinct(iconLog.icon, iconLog.iconCount, iconLog.iconRun, &iconLog.iconDistinct, mem[8], iconLog.curIconRun);
+  const int prev = iconLog.prevInputV;
+  iconLog.prevInputV = inputV;
+  if (inputV > 253 && prev > 253) { iconLog.hiMode = mem[6]; iconLog.hiIcon = mem[8]; iconLog.hiV = inputV; iconLog.hiEpoch = nowEpoch(); }
+  else if (inputV >= 0 && inputV < 207 && prev >= 0 && prev < 207) { iconLog.loMode = mem[6]; iconLog.loIcon = mem[8]; iconLog.loV = inputV; iconLog.loEpoch = nowEpoch(); }
+}
+
+// Sanity kontrola rámce proti posunutým/zkaženým rámcům, které projdou filtrem napětí:
+// Čeperka 1 občas dodá rámec „mode 0x10 + výstup 235 V" (místo 0x22 / 239 V) — jeden posunutý
+// bit rozhodí víc bajtů najednou. Invarianty ze všech známých stavů displeje:
+//  - mem[6] (režim) má vždy bit 0x02 (síť 0x22, baterie 0x42/0x46, přehřátí 0x43/0x83/0xC3),
+//  - mem[8] (pevné ikony V/Hz) má vždy svítit 0x63 (normál 0x63, přehřátí 0x67).
+// Kontrola jen vyžaduje známé bity, přidané neznámé (hledané V↑/V↓) propouští; pro zhaslý displej
+// (přehřátí) se nevolá, protože tam mem[6]/mem[8] samy nesou informaci.
+bool frameLooksCorrupt(const uint8_t* mem) {
+  if ((mem[6] & 0x02) == 0) return true;
+  if ((mem[8] & 0x63) != 0x63) return true;
+  return false;
 }
 
 void updateDecodedState(const uint8_t* mem, uint8_t brightness) {
@@ -804,6 +848,10 @@ void updateDecodedState(const uint8_t* mem, uint8_t brightness) {
 
   if (!voltageLooksValid(candidateInput, candidateOutput) || !brightnessOk) {
     state.filteredFrames++;
+    return;
+  }
+  if (!candidateDisplayBlank && frameLooksCorrupt(mem)) {
+    state.rejectedFrames++;
     return;
   }
 
@@ -887,13 +935,11 @@ void updateDecodedState(const uint8_t* mem, uint8_t brightness) {
   }
 
   // přepětí/podpětí z dekódovaného vstupního napětí (prahy 110 %/90 % nominálu 230 V → 253/207 V)
-  if (state.mainsPresent && state.inputVoltage >= 0) {
-    state.overVoltage = state.inputVoltage > 253;
-    state.underVoltage = state.inputVoltage < 207;
-  } else {
-    state.overVoltage = false;
-    state.underVoltage = false;
-  }
+  const bool mainsV = state.mainsPresent && state.inputVoltage >= 0;
+  state.overVoltage = confirmFlag(mainsV && state.inputVoltage > 253, stableOverVoltage, pendingOverVoltage,
+                                  pendingOverVoltageCount, SOURCE_CONFIRM_FRAMES);
+  state.underVoltage = confirmFlag(mainsV && state.inputVoltage < 207, stableUnderVoltage, pendingUnderVoltage,
+                                   pendingUnderVoltageCount, SOURCE_CONFIRM_FRAMES);
   state.avrState = state.overVoltage ? "buck" : (state.underVoltage ? "boost" : (state.mainsPresent ? "normal" : "n/a"));
   recordIconScan(state.mem, state.mainsPresent ? state.inputVoltage : -1);
 
@@ -1417,7 +1463,7 @@ void sendStatusJson(bool isAdmin) {
     "\"overVoltage\":%s,\"underVoltage\":%s,\"avrState\":\"%s\","
     "\"modeRaw\":\"0x%02X\",\"loadRaw\":\"0x%02X\",\"iconRaw\":\"0x%02X\",\"batteryRaw\":\"0x%02X\","
     "\"brightnessRaw\":\"0x%02X\",\"lastAgeMs\":%lu,\"bytes\":%lu,\"errors\":%lu,"
-    "\"filtered\":%lu,\"captureOk\":%lu,\"captureTimeouts\":%lu,\"lastCaptureMs\":%lu,"
+    "\"filtered\":%lu,\"rejected\":%lu,\"captureOk\":%lu,\"captureTimeouts\":%lu,\"lastCaptureMs\":%lu,"
     "\"freeHeap\":%u,\"rssi\":%d,\"ip\":\"%s\",\"mask\":\"%s\",\"gw\":\"%s\",\"dns\":\"%s\","
     "\"resetReason\":\"%s\",\"uptimeSec\":%lu,\"minFreeHeap\":%u,\"maxAllocHeap\":%u,"
     "\"txPowerDbm\":%.2f,\"cpuMhz\":%u,\"barsLearned\":%u,\"learnedUsableWh\":%d,"
@@ -1463,6 +1509,7 @@ void sendStatusJson(bool isAdmin) {
     (unsigned long)state.byteCount,
     (unsigned long)state.decodeErrors,
     (unsigned long)state.filteredFrames,
+    (unsigned long)state.rejectedFrames,
     (unsigned long)state.captureOk,
     (unsigned long)state.captureTimeouts,
     (unsigned long)state.lastCaptureMs,
@@ -1833,7 +1880,7 @@ void handleUpdateDone() {
 
 const uint32_t SNMP_BASE_OID[] = {1, 3, 6, 1, 4, 1, 53864, 1, 1};
 const uint8_t SNMP_BASE_LEN = sizeof(SNMP_BASE_OID) / sizeof(SNMP_BASE_OID[0]);
-const uint8_t SNMP_MAX_INDEX = 50;  // idx 50 = verze firmwaru (string)
+const uint8_t SNMP_MAX_INDEX = 51;  // idx 50 = verze firmwaru (string), 51 = zahozené rámce (sanity)
 
 bool readBerLen(const uint8_t* data, int total, int& pos, int& len) {
   if (pos >= total) return false;
@@ -2019,6 +2066,7 @@ bool getSnmpValue(uint8_t idx, SnmpValue& value) {
     case 48: value.type = 0x04; strncpy(value.text, state.avrState, sizeof(value.text) - 1); break;  // AVR stav: buck/boost/normal/n-a
     case 49: value.integer = state.runtimeProjectedSec; break;  // proaktivní odhad výdrže [s] (na síti: kdyby teď vypadl proud)
     case 50: value.type = 0x04; strncpy(value.text, FW_VERSION, sizeof(value.text) - 1); break;  // verze firmwaru
+    case 51: value.integer = (int32_t)state.rejectedFrames; break;  // rámce zahozené sanity kontrolou (v1.22)
     default: return false;
   }
   value.text[sizeof(value.text) - 1] = 0;
@@ -2323,18 +2371,20 @@ void sendDigitScan() {
     const int8_t g = guessDigitFromSegments(unkLog.pattern[i]);
     if (g >= 0)
       n += snprintf(responseBody + n, sizeof(responseBody) - n,
-                    "  0x%02X x%u  -> nejspis %d\n", unkLog.pattern[i], unkLog.count[i], g);
+                    "  0x%02X x%lu  -> nejspis %d\n", unkLog.pattern[i], (unsigned long)unkLog.count[i], g);
     else
       n += snprintf(responseBody + n, sizeof(responseBody) - n,
-                    "  0x%02X x%u  -> ?\n", unkLog.pattern[i], unkLog.count[i]);
+                    "  0x%02X x%lu  -> ?\n", unkLog.pattern[i], (unsigned long)unkLog.count[i]);
   }
   snprintf(responseBody + n, sizeof(responseBody) - n,
-           "pozn.: predikce z bit-layoutu 9 = 0x7D (a,b,c,d,f,g; s teckou 0xFD). Po potvrzeni pridat do digitFromPattern().\n");
+           "pozn.: segmenty a=0x20 b=0x40 c=0x01 d=0x04 e=0x02 f=0x10 g=0x08 DP=0x80; znama cislice + 1 bit navic/chybi = sum, ne novy glyf.\n"
+           "reset histogramu: /api/digitscan?reset=1\n");
   server.sendHeader("Cache-Control", "no-store");
   server.send(200, "text/plain; charset=utf-8", responseBody);
 }
 void handleDigitScan() {
   if (!requireAuth()) return;
+  if (server.hasArg("reset")) resetDigitScan();
   sendDigitScan();
 }
 
@@ -2342,8 +2392,10 @@ void sendIconScan() {
   int n = snprintf(responseBody, sizeof(responseBody),
                    "icon-scan ikon displeje (hledame V-nahoru/V-dolu pri prepeti/podpeti) - fw v%s\n"
                    "celkem vzorku: %lu | normalni pasmo vstupu 207-253 V\n"
-                   "mem[6]=mode, mem[8]=ikony; porovnej hodnoty pri prepeti/podpeti s normalem.\n",
-                   FW_VERSION, (unsigned long)iconLog.total);
+                   "mem[6]=mode, mem[8]=ikony; porovnej hodnoty pri prepeti/podpeti s normalem.\n"
+                   "sloupce: hodnota x pocet | maxrun = nejdelsi souvisla rada ramcu (1-2 = sum, desitky+ = realna ikona)\n"
+                   "zahozeno sanity kontrolou ramce: %lu | reset histogramu: /api/iconscan?reset=1\n",
+                   FW_VERSION, (unsigned long)iconLog.total, (unsigned long)state.rejectedFrames);
   if (iconLog.hiV >= 0)
     n += snprintf(responseBody + n, sizeof(responseBody) - n,
                   "PREPETI (>253V): mode=0x%02X icon=0x%02X pri %d V, pred %lu s\n",
@@ -2358,16 +2410,17 @@ void sendIconScan() {
   else n += snprintf(responseBody + n, sizeof(responseBody) - n, "PODPETI (<207V): zatim nezachyceno\n");
   n += snprintf(responseBody + n, sizeof(responseBody) - n, "histogram mem[6] (mode):\n");
   for (uint8_t i = 0; i < iconLog.modeDistinct; i++)
-    n += snprintf(responseBody + n, sizeof(responseBody) - n, "  0x%02X x%u\n", iconLog.mode[i], iconLog.modeCount[i]);
+    n += snprintf(responseBody + n, sizeof(responseBody) - n, "  0x%02X x%lu | maxrun %u\n", iconLog.mode[i], (unsigned long)iconLog.modeCount[i], iconLog.modeRun[i]);
   n += snprintf(responseBody + n, sizeof(responseBody) - n, "histogram mem[8] (ikony):\n");
   for (uint8_t i = 0; i < iconLog.iconDistinct; i++)
-    n += snprintf(responseBody + n, sizeof(responseBody) - n, "  0x%02X x%u\n", iconLog.icon[i], iconLog.iconCount[i]);
+    n += snprintf(responseBody + n, sizeof(responseBody) - n, "  0x%02X x%lu | maxrun %u\n", iconLog.icon[i], (unsigned long)iconLog.iconCount[i], iconLog.iconRun[i]);
   server.sendHeader("Cache-Control", "no-store");
   server.send(200, "text/plain; charset=utf-8", responseBody);
 }
 
 void handleIconScan() {
   if (!requireAuth()) return;
+  if (server.hasArg("reset")) resetIconScan();
   sendIconScan();
 }
 
